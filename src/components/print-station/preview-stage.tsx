@@ -329,7 +329,7 @@ export function PreviewStage(props: PreviewStageProps) {
         {!file ? (
           <UploadDropzone onFiles={onFiles} onSamples={onSamples} dragging={dragging} />
         ) : (
-          <div className="flex min-h-full w-max min-w-full items-center justify-center p-9 pb-16">
+          <div className="flex min-h-full w-max min-w-full items-center justify-center p-9 pb-32 lg:pb-16">
             {file.status === "error" ? (
               <div className="flex w-full max-w-[440px] flex-col items-center rounded-lg border border-[#E5E7EB] bg-white px-8 py-10 text-center">
                 <FileWarning size={24} strokeWidth={1.5} className="text-[#6B7280]" />
@@ -481,7 +481,7 @@ export function PreviewStage(props: PreviewStageProps) {
 
       {/* Floating stage controls */}
       {file && file.status !== "error" ? (
-        <div className="absolute bottom-4 left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white px-1.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)]">
+        <div className="absolute bottom-[84px] left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white px-1.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)] lg:bottom-4">
           <button
             type="button"
             aria-label="Halaman sebelumnya"

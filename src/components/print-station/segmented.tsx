@@ -6,6 +6,8 @@ interface SegmentedOption<T extends string> {
   value: T;
   label: string;
   icon?: React.ReactNode;
+  /** Extra classes for the label span — e.g. "hidden sm:inline" for icon-only compact mode. */
+  labelClassName?: string;
   dot?: "ok" | "off" | "wait";
 }
 
@@ -48,6 +50,7 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={active}
+            aria-label={opt.label}
             disabled={disabled}
             onClick={() => onChange(opt.value)}
             className={`flex h-[26px] items-center gap-1.5 rounded-[5px] px-2.5 text-[12px] font-medium transition-colors ${
@@ -58,7 +61,7 @@ export function Segmented<T extends string>({
           >
             {opt.dot ? <Dot kind={opt.dot} /> : null}
             {opt.icon}
-            {opt.label}
+            <span className={opt.labelClassName}>{opt.label}</span>
           </button>
         );
       })}

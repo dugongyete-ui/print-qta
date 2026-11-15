@@ -8,6 +8,7 @@ import { usePrintStation } from "@/hooks/use-print-station";
 import { TopBar } from "./top-bar";
 import { PreviewStage } from "./preview-stage";
 import { InspectorSidebar } from "./inspector-sidebar";
+import { PrintActionBar } from "./print-action-bar";
 
 export function PrintStation() {
   const store = usePrintStation();
@@ -81,6 +82,15 @@ export function PrintStation() {
           onOpenChange={setSidebarOpen}
         />
       </main>
+
+      {/* Tablet / mobile: persistent print execution bar (<lg) */}
+      <PrintActionBar
+        summary={store.summary}
+        rangeInvalid={store.rangeInvalid}
+        canPrint={store.canPrint}
+        printing={store.printing}
+        onPrint={() => void store.triggerPrint()}
+      />
     </div>
   );
 }

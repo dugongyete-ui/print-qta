@@ -2,7 +2,7 @@
 
 // 52px top utility bar: app identity, physical tray selector, printer status.
 
-import { Printer, Settings2 } from "lucide-react";
+import { HardDrive, Monitor, Printer, Settings2 } from "lucide-react";
 import { PAPERS, getPaper, type PaperId } from "@/lib/paper";
 import type { PrintMode, SpoolerState } from "@/lib/print-station/types";
 import { Segmented } from "./segmented";
@@ -72,8 +72,8 @@ export function TopBar({
           </Select>
         </div>
 
-        {/* Printer status pill */}
-        <div className="hidden h-8 items-center gap-2 rounded-full border border-[#E5E7EB] bg-white px-3 sm:flex">
+        {/* Printer status pill (hidden < lg to keep the utility bar within width) */}
+        <div className="hidden h-8 items-center gap-2 rounded-full border border-[#E5E7EB] bg-white px-3 lg:flex">
           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#10B981]" aria-hidden="true" />
           <span className="whitespace-nowrap text-[12px] font-medium text-[#111827]">
             Epson L3210 Series
@@ -81,23 +81,34 @@ export function TopBar({
           <span className="whitespace-nowrap text-[12px] text-[#6B7280]">• Siap</span>
         </div>
 
-        {/* Print mode */}
+        {/* Print mode — labels collapse to icons below sm */}
         <Segmented<PrintMode>
           value={printMode}
           onChange={onPrintModeChange}
           options={[
-            { value: "browser", label: "Browser" },
-            { value: "spooler", label: "Spooler", dot: spoolerDot },
+            {
+              value: "browser",
+              label: "Browser",
+              icon: <Monitor size={13} strokeWidth={1.5} aria-hidden="true" />,
+              labelClassName: "hidden sm:inline",
+            },
+            {
+              value: "spooler",
+              label: "Spooler",
+              icon: <HardDrive size={13} strokeWidth={1.5} aria-hidden="true" />,
+              labelClassName: "hidden sm:inline",
+              dot: spoolerDot,
+            },
           ]}
           title="Mode eksekusi cetak"
         />
 
-        {/* Sidebar toggle (mobile/tablet) */}
+        {/* Inspector toggle (tablet / mobile — desktop shows the fixed sidebar) */}
         <button
           type="button"
           onClick={onOpenSidebar}
-          aria-label="Buka panel pengaturan cetak"
-          className="flex h-8 w-8 items-center justify-center rounded-md border border-[#E5E7EB] bg-white text-[#374151] hover:bg-[#F9FAFB] lg:hidden"
+          aria-label="Buka pengaturan cetak"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[#E5E7EB] bg-white text-[#374151] transition-colors hover:bg-[#F9FAFB] lg:hidden"
         >
           <Settings2 size={15} strokeWidth={1.5} />
         </button>
