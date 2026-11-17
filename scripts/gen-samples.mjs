@@ -46,7 +46,7 @@ async function makePdf() {
       x: 48, y: 668, size: 13, font: fontRegular, color: rgb(1, 1, 1),
     });
     page.drawText(spec.title, {
-      x: 48, y: 560, size: 42, font, color: rgb(0.07, 0.09, 0.15),
+      x: 48, y: 560, size: 42, font, color: rgb(0, 0, 0),
     });
     const lines = [
       "Ukuran dokumen asli: Letter (216 x 279 mm).",
@@ -60,7 +60,7 @@ async function makePdf() {
     lines.forEach((line, i) => {
       page.drawText(line, {
         x: 48, y: 500 - i * 24, size: 12, font: fontRegular,
-        color: rgb(0.2, 0.24, 0.3),
+        color: rgb(0, 0, 0),
       });
     });
   }

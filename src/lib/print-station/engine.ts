@@ -51,6 +51,49 @@ function applyGrayscale(canvas: HTMLCanvasElement): void {
   ctx.putImageData(image, 0, 0);
 }
 
+/**
+ * Print-black normalization (text enhancement).
+ *
+ * Inkjet drivers color-manage raster output, so "near-black" composite text
+ * (e.g. #121726 / #333D4D) prints as a CMY mix that reads brown/warm on paper
+ * instead of true black. Snapping dark neutral pixels to pure #000000 lets
+ * the driver's GCR render them as K-only black; neutralizing mid-dark grays
+ * removes the warm/cool cast on anti-aliased glyph edges. Conservative
+ * thresholds keep intentional colored content untouched.
+ */
+function normalizePrintBlack(canvas: HTMLCanvasElement): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const px = image.data;
+  const DARK_MAX = 80; // max channel value still counted as black text
+  const DARK_SPREAD = 28; // max channel spread still counted as neutral
+  const NEUTRAL_SPREAD = 12; // spread below this = true neutral gray
+  const NEUTRAL_MAX = 160; // grays darker than this get cast-removed
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i + 3] === 0) continue;
+    const r = px[i];
+    const g = px[i + 1];
+    const b = px[i + 2];
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const spread = max - min;
+    if (max <= DARK_MAX && spread <= DARK_SPREAD) {
+      // near-black text -> true black (K-only on the printer)
+      px[i] = 0;
+      px[i + 1] = 0;
+      px[i + 2] = 0;
+    } else if (spread <= NEUTRAL_SPREAD && max <= NEUTRAL_MAX) {
+      // dark neutral gray (incl. glyph AA halo) -> exact luminance gray
+      const l = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+      px[i] = l;
+      px[i + 1] = l;
+      px[i + 2] = l;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
 function fitScale(
   docWmm: number,
   docHmm: number,
@@ -94,6 +137,7 @@ async function renderPdfSheets(req: BrowserPrintRequest): Promise<string[]> {
     canvas.height = Math.max(1, Math.floor(viewport.height));
     await page.render({ canvas, viewport }).promise;
     if (grayscale) applyGrayscale(canvas);
+    normalizePrintBlack(canvas);
 
     const w = docWmm * s;
     const h = docHmm * s;
@@ -134,6 +178,7 @@ async function renderImageSheets(req: BrowserPrintRequest): Promise<string[]> {
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(img, dx, dy, drawW, drawH);
   if (colorMode === "grayscale") applyGrayscale(canvas);
+  normalizePrintBlack(canvas);
 
   return [
     `<div class="sheet"><img src="${canvas.toDataURL("image/png")}" style="width:${fmt(paperWmm)}mm;height:${fmt(paperHmm)}mm" alt=""/></div>`,
