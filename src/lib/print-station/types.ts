@@ -117,6 +117,12 @@ export interface PhotoSettings {
   marginMm: number;
   /** Gap between photos when auto-filling / arranging (mm). */
   gapMm: number;
+  /**
+   * How many photos to tile per sheet ("Jumlah Foto"). The sheet auto-regrids
+   * to this count whenever it changes, a preset changes, or a photo is
+   * uploaded — the print-shop "cetak 6 lembar pas foto" flow.
+   */
+  perSheet: number;
   /** Draw dashed cut guides around each photo (pas-foto sheets). */
   cutLines: boolean;
   /** Keep width/height ratio when resizing (Word-like aspect lock). */
@@ -127,9 +133,10 @@ export interface PhotoSettings {
 }
 
 export const DEFAULT_PHOTO_SETTINGS: PhotoSettings = {
-  presetId: "p-4r",
+  presetId: "pf-3x4",
   marginMm: 5,
   gapMm: 4,
+  perSheet: 6,
   cutLines: true,
   lockAspect: true,
   customWMm: 102,

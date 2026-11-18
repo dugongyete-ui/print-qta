@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-
 // Photo-mode inspector: full photo size presets, Word-like position/size
 // numeric controls, sheet tools (fill / arrange / align / cut lines) and the
 // per-photo list of everything placed on the sheet.
@@ -186,7 +184,7 @@ interface PhotoInspectorProps {
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
 
-const COUNT_QUICK: number[] = [2, 4, 6, 8, 12];
+const COUNT_QUICK: number[] = [2, 4, 6, 8, 9, 12];
 
 export function PhotoInspector({
   placements,
@@ -211,10 +209,16 @@ export function PhotoInspector({
   onClear,
   onAddImages,
 }: PhotoInspectorProps) {
-  // Requested copy count for "Susun N Foto" — clamped to what actually fits.
+  // "Jumlah Foto" lives in the shared photo settings so this control, photo
+  // uploads and preset changes all drive the same auto-grid count.
   const capSafe = Math.max(1, Math.min(capacity, 200));
-  const [count, setCount] = useState(6);
-  const n = Math.max(1, Math.min(count, capSafe));
+  const n = Math.max(1, Math.min(settings.perSheet, capSafe));
+  const setCount = (next: number) => {
+    const v = Math.max(1, Math.min(next, capSafe));
+    onSetting({ perSheet: v });
+    // Live re-tile: changing the count immediately re-arranges the sheet.
+    onArrangeCount(v);
+  };
   const placedIds = new Set(placements.map((p) => p.itemId));
   const unplacedImages = files.filter(
     (f) => f.kind === "image" && f.status === "ready" && !!f.url && !placedIds.has(f.id),
@@ -447,7 +451,7 @@ export function PhotoInspector({
               type="button"
               aria-label="Kurangi jumlah foto"
               disabled={n <= 1}
-              onClick={() => setCount((c) => Math.max(1, c - 1))}
+              onClick={() => setCount(n - 1)}
               className="flex h-8 w-8 items-center justify-center text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <Minus size={13} strokeWidth={1.5} />
@@ -462,7 +466,7 @@ export function PhotoInspector({
               type="button"
               aria-label="Tambah jumlah foto"
               disabled={n >= capSafe}
-              onClick={() => setCount((c) => Math.min(capSafe, c + 1))}
+              onClick={() => setCount(n + 1)}
               className="flex h-8 w-8 items-center justify-center text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <Plus size={13} strokeWidth={1.5} />
@@ -486,25 +490,27 @@ export function PhotoInspector({
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() => onArrangeCount(n)}
-          disabled={placements.length === 0}
-          className="flex h-9 w-full items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[12px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5 disabled:opacity-30"
-        >
-          <Rows3 size={13} strokeWidth={1.5} />
-          Susun {n} Foto ({preset.short})
-        </button>
         <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
-          Menjajarkan {n} salinan foto terpilih/pertama persis sesuai ukuran
-          preset — grid rapi di tengah lembar, baris terakhir tetap seimbang.
+          Mengubah jumlah langsung mengejajarkan {n} foto di lembar — grid
+          seimbang di tengah, ukuran persis mengikuti preset.
         </p>
-        <div className="grid grid-cols-2 gap-1">
+        <div className="grid grid-cols-3 gap-1">
+          <button
+            type="button"
+            onClick={() => onArrangeCount(n)}
+            disabled={placements.length === 0}
+            title={`Susun ulang ${n} foto sesuai preset ${preset.short}`}
+            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#003399] bg-white text-[11px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5 disabled:opacity-30"
+          >
+            <Rows3 size={12} strokeWidth={1.5} />
+            Susun
+          </button>
           <button
             type="button"
             onClick={onFillSheet}
             disabled={placements.length === 0}
-            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+            title="Isi lembar penuh dengan salinan foto"
+            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#E5E7EB] bg-white text-[11px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
           >
             <LayoutGrid size={12} strokeWidth={1.5} />
             Isi Penuh
@@ -513,7 +519,8 @@ export function PhotoInspector({
             type="button"
             onClick={onArrange}
             disabled={placements.length === 0}
-            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+            title="Rapikan foto menjadi baris yang rapi"
+            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#E5E7EB] bg-white text-[11px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
           >
             <Wand2 size={12} strokeWidth={1.5} />
             Rapikan

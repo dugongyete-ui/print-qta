@@ -148,7 +148,7 @@ export const PHOTO_PRESETS: PhotoPreset[] = [
   },
 ];
 
-export const DEFAULT_PHOTO_PRESET_ID = "p-4r";
+export const DEFAULT_PHOTO_PRESET_ID = "pf-3x4";
 
 /**
  * One-tap quick chips for the most-ordered sizes at Indonesian print shops
