@@ -1,0 +1,1201 @@
+     1→"use client";
+     2→
+     3→// Central workspace state: file intake + inspection, print settings,
+     4→// auto-fit-to-tray logic, and the dual-mode print execution paths.
+     5→
+     6→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+     7→import type { PDFDocumentLoadingTask, PDFDocumentProxy } from "pdfjs-dist";
+     8→import { toast } from "sonner";
+     9→import {
+    10→  PT_TO_MM,
+    11→  PX96_TO_MM,
+    12→  getPaper,
+    13→  matchPaper,
+    14→  paperDims,
+    15→  parsePageRange,
+    16→  sizeLabel,
+    17→} from "@/lib/paper";
+    18→import {
+    19→  DEFAULT_PHOTO_SETTINGS,
+    20→  DEFAULT_SETTINGS,
+    21→  MAX_FILE_BYTES,
+    22→  MAX_PLACEMENTS,
+    23→  MIN_PHOTO_MM,
+    24→  type DocxRender,
+    25→  type LoadedFile,
+    26→  type PhotoPlacement,
+    27→  type PhotoSettings,
+    28→  type PrintSettings,
+    29→  type SpoolerState,
+    30→} from "@/lib/print-station/types";
+    31→import {
+    32→  printPhotoViaBrowser,
+    33→  printViaBrowser,
+    34→  renderPhotoSheetCanvas,
+    35→  type PhotoSheetSpec,
+    36→} from "@/lib/print-station/engine";
+    37→import { getPhotoPreset } from "@/lib/print-station/photo-sizes";
+    38→
+    39→// ---------------------------------------------------------------------------
+    40→// Module-level document caches (survive component re-renders)
+    41→// ---------------------------------------------------------------------------
+    42→const pdfTaskCache = new Map<string, Promise<PDFDocumentLoadingTask>>();
+    43→const docxRenderCache = new Map<string, Promise<DocxRender>>();
+    44→const docHtmlCache = new Map<string, Promise<string>>();
+    45→
+    46→const ACCEPTED_EXT: Record<string, { kind: LoadedFile["kind"]; mime: string }> = {
+    47→  pdf: { kind: "pdf", mime: "application/pdf" },
+    48→  doc: { kind: "doc", mime: "application/msword" },
+    49→  docx: {
+    50→    kind: "docx",
+    51→    mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    52→  },
+    53→  png: { kind: "image", mime: "image/png" },
+    54→  jpg: { kind: "image", mime: "image/jpeg" },
+    55→  jpeg: { kind: "image", mime: "image/jpeg" },
+    56→};
+    57→
+    58→function newId(): string {
+    59→  return `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    60→}
+    61→
+    62→function newPhotoId(): string {
+    63→  return `ph_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    64→}
+    65→
+    66→// ---------------------------------------------------------------------------
+    67→// Photo placement geometry helpers (mm, center-based rotation)
+    68→// ---------------------------------------------------------------------------
+    69→
+    70→const PHOTO_TOL = 0.5;
+    71→
+    72→export type PhotoAlign =
+    73→  | "left"
+    74→  | "centerX"
+    75→  | "right"
+    76→  | "top"
+    77→  | "centerY"
+    78→  | "bottom";
+    79→
+    80→function normRotation(rot: number): number {
+    81→  const r = Math.round(rot / 90) * 90;
+    82→  return ((r % 360) + 360) % 360;
+    83→}
+    84→
+    85→function swappedBBox(rotation: number): boolean {
+    86→  const r = normRotation(rotation);
+    87→  return r === 90 || r === 270;
+    88→}
+    89→
+    90→/** Visual bounding box (mm) of a placement, accounting for rotation. */
+    91→function placementBBox(p: {
+    92→  xMm: number;
+    93→  yMm: number;
+    94→  wMm: number;
+    95→  hMm: number;
+    96→  rotation: number;
+    97→}): { x: number; y: number; w: number; h: number } {
+    98→  const swapped = swappedBBox(p.rotation);
+    99→  const w = swapped ? p.hMm : p.wMm;
+   100→  const h = swapped ? p.wMm : p.hMm;
+   101→  const cx = p.xMm + p.wMm / 2;
+   102→  const cy = p.yMm + p.hMm / 2;
+   103→  return { x: cx - w / 2, y: cy - h / 2, w, h };
+   104→}
+   105→
+   106→/** Keep the visual bbox fully on the paper by clamping the rotation center. */
+   107→function clampPlacement(
+   108→  p: PhotoPlacement,
+   109→  paperWmm: number,
+   110→  paperHmm: number,
+   111→): PhotoPlacement {
+   112→  const bb = placementBBox(p);
+   113→  const cx = p.xMm + p.wMm / 2;
+   114→  const cy = p.yMm + p.hMm / 2;
+   115→  const ncx = Math.min(
+   116→    Math.max(cx, bb.w / 2),
+   117→    Math.max(bb.w / 2, paperWmm - bb.w / 2),
+   118→  );
+   119→  const ncy = Math.min(
+   120→    Math.max(cy, bb.h / 2),
+   121→    Math.max(bb.h / 2, paperHmm - bb.h / 2),
+   122→  );
+   123→  return { ...p, xMm: ncx - p.wMm / 2, yMm: ncy - p.hMm / 2 };
+   124→}
+   125→
+   126→function toBase64(bytes: Uint8Array): string {
+   127→  let binary = "";
+   128→  const chunk = 0x8000;
+   129→  for (let i = 0; i < bytes.length; i += chunk) {
+   130→    binary += String.fromCharCode(
+   131→      ...Array.from(bytes.subarray(i, i + chunk)),
+   132→    );
+   133→  }
+   134→  return btoa(binary);
+   135→}
+   136→
+   137→// ---------------------------------------------------------------------------
+   138→// Document inspection pipelines
+   139→// ---------------------------------------------------------------------------
+   140→
+   141→function loadPdfTask(file: LoadedFile): Promise<PDFDocumentLoadingTask> {
+   142→  const cached = pdfTaskCache.get(file.id);
+   143→  if (cached) return cached;
+   144→  const task = (async () => {
+   145→    const pdfjs = await import("pdfjs-dist");
+   146→    pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+   147→    // pdf.js may transfer the buffer to the worker — always hand it a copy.
+   148→    const data = file.bytes!.slice();
+   149→    return pdfjs.getDocument({ data });
+   150→  })();
+   151→  pdfTaskCache.set(file.id, task);
+   152→  return task;
+   153→}
+   154→
+   155→async function loadPdfDoc(file: LoadedFile): Promise<PDFDocumentProxy> {
+   156→  const task = await loadPdfTask(file);
+   157→  return task.promise;
+   158→}
+   159→
+   160→async function inspectPdf(file: LoadedFile): Promise<Partial<LoadedFile>> {
+   161→  try {
+   162→    const doc = await loadPdfDoc(file);
+   163→    const page1 = await doc.getPage(1);
+   164→    const vp = page1.getViewport({ scale: 1 });
+   165→    const wMm = vp.width * PT_TO_MM;
+   166→    const hMm = vp.height * PT_TO_MM;
+   167→    const matched = matchPaper(wMm, hMm);
+   168→    return {
+   169→      status: "ready",
+   170→      pageCount: doc.numPages,
+   171→      docWidthMm: wMm,
+   172→      docHeightMm: hMm,
+   173→      docLabel: matched ? getPaper(matched).shortLabel : sizeLabel(wMm, hMm),
+   174→    };
+   175→  } catch {
+   176→    pdfTaskCache.delete(file.id);
+   177→    return {
+   178→      status: "error",
+   179→      error: "Dokumen PDF rusak, terproteksi, atau tidak dapat dibaca.",
+   180→    };
+   181→  }
+   182→}
+   183→
+   184→async function inspectImage(file: LoadedFile): Promise<Partial<LoadedFile>> {
+   185→  if (!file.bytes) {
+   186→    return { status: "error", error: "Data gambar kosong." };
+   187→  }
+   188→  const url = URL.createObjectURL(
+   189→    new Blob([file.bytes.slice().buffer as ArrayBuffer], { type: file.mime }),
+   190→  );
+   191→  try {
+   192→    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+   193→      const el = new Image();
+   194→      el.onload = () => resolve(el);
+   195→      el.onerror = () => reject(new Error("decode"));
+   196→      el.src = url;
+   197→    });
+   198→    return {
+   199→      status: "ready",
+   200→      url,
+   201→      pageCount: 1,
+   202→      docWidthMm: img.naturalWidth * PX96_TO_MM,
+   203→      docHeightMm: img.naturalHeight * PX96_TO_MM,
+   204→      docLabel: `${img.naturalWidth} × ${img.naturalHeight} px`,
+   205→    };
+   206→  } catch {
+   207→    URL.revokeObjectURL(url);
+   208→    return { status: "error", error: "Gambar tidak dapat dibaca atau rusak." };
+   209→  }
+   210→}
+   211→
+   212→async function renderDocx(file: LoadedFile): Promise<DocxRender> {
+   213→  const cached = docxRenderCache.get(file.id);
+   214→  if (cached) return cached;
+   215→  const task = (async () => {
+   216→    const docxPreview = await import("docx-preview");
+   217→    const host = document.createElement("div");
+   218→    host.style.cssText =
+   219→      "position:fixed;left:-100000px;top:0;width:1200px;visibility:hidden;";
+   220→    document.body.appendChild(host);
+   221→    try {
+   222→      await docxPreview.renderAsync(
+   223→        new Blob([file.bytes!.slice().buffer as ArrayBuffer], { type: file.mime }),
+   224→        host,
+   225→        host,
+   226→        {
+   227→          inWrapper: true,
+   228→          breakPages: true,
+   229→          experimental: true,
+   230→          renderHeaders: true,
+   231→          renderFooters: true,
+   232→          useBase64URL: true,
+   233→          ignoreWidth: false,
+   234→          ignoreHeight: false,
+   235→        },
+   236→      );
+   237→      const wrapper = host.querySelector(".docx-wrapper");
+   238→      const sections = wrapper
+   239→        ? Array.from(wrapper.querySelectorAll("section.docx"))
+   240→        : Array.from(host.querySelectorAll("section.docx"));
+   241→      if (sections.length === 0) throw new Error("no-sections");
+   242→      const first = sections[0] as HTMLElement;
+   243→      const wpx = first.offsetWidth || Math.round(210 * (96 / 25.4));
+   244→      const hpx = first.offsetHeight || Math.round(297 * (96 / 25.4));
+   245→      return {
+   246→        sectionsHtml: sections.map((s) => (s as HTMLElement).outerHTML),
+   247→        pageWpx: wpx,
+   248→        pageHpx: hpx,
+   249→        pageWmm: wpx * PX96_TO_MM,
+   250→        pageHmm: hpx * PX96_TO_MM,
+   251→        pageCount: sections.length,
+   252→      } satisfies DocxRender;
+   253→    } finally {
+   254→      host.remove();
+   255→    }
+   256→  })();
+   257→  docxRenderCache.set(file.id, task);
+   258→  return task;
+   259→}
+   260→
+   261→async function convertViaServer(file: LoadedFile): Promise<string> {
+   262→  const cached = docHtmlCache.get(file.id);
+   263→  if (cached) return cached;
+   264→  const task = (async () => {
+   265→    const form = new FormData();
+   266→    form.append(
+   267→      "file",
+   268→      new Blob([file.bytes!.slice().buffer as ArrayBuffer], { type: file.mime }),
+   269→      file.name,
+   270→    );
+   271→    const res = await fetch("/api/convert-docx", { method: "POST", body: form });
+   272→    if (!res.ok) {
+   273→      const body = (await res.json().catch(() => null)) as { message?: string } | null;
+   274→      throw new Error(body?.message ?? "Konversi dokumen gagal di server.");
+   275→    }
+   276→    const body = (await res.json()) as { html: string };
+   277→    return body.html;
+   278→  })();
+   279→  docHtmlCache.set(file.id, task);
+   280→  return task;
+   281→}
+   282→
+   283→async function inspectWord(file: LoadedFile): Promise<Partial<LoadedFile>> {
+   284→  // 1st choice: client-side docx-preview (true pagination + layout)
+   285→  if (file.kind === "docx") {
+   286→    try {
+   287→      const render = await renderDocx(file);
+   288→      const matched = matchPaper(render.pageWmm, render.pageHmm);
+   289→      return {
+   290→        status: "ready",
+   291→        pageCount: render.pageCount,
+   292→        docWidthMm: render.pageWmm,
+   293→        docHeightMm: render.pageHmm,
+   294→        docLabel: matched ? getPaper(matched).shortLabel : sizeLabel(render.pageWmm, render.pageHmm),
+   295→      };
+   296→    } catch {
+   297→      docxRenderCache.delete(file.id);
+   298→      // fall through to server-side mammoth
+   299→    }
+   300→  }
+   301→  // 2nd choice: server conversion (mammoth / LibreOffice headless)
+   302→  try {
+   303→    await convertViaServer(file);
+   304→    return {
+   305→      status: "ready",
+   306→      continuous: true,
+   307→      pageCount: 1,
+   308→      docWidthMm: 210,
+   309→      docHeightMm: 297,
+   310→      docLabel: "Halaman Mengalir",
+   311→    };
+   312→  } catch (err) {
+   313→    return {
+   314→      status: "error",
+   315→      error:
+   316→        err instanceof Error
+   317→          ? err.message
+   318→          : "Konversi dokumen gagal. Simpan ulang sebagai .docx atau PDF.",
+   319→    };
+   320→  }
+   321→}
+   322→
+   323→// ---------------------------------------------------------------------------
+   324→
+   325→export interface DuplexAssist {
+   326→  evenPages: number[];
+   327→}
+   328→
+   329→export function usePrintStation() {
+   330→  const [files, setFiles] = useState<LoadedFile[]>([]);
+   331→  const [activeId, setActiveId] = useState<string | null>(null);
+   332→  const [settings, setSettings] = useState<PrintSettings>(DEFAULT_SETTINGS);
+   333→  const [photoMode, setPhotoModeState] = useState(false);
+   334→  const [photoPlacements, setPhotoPlacements] = useState<PhotoPlacement[]>([]);
+   335→  const [photoSelectedId, setPhotoSelectedId] = useState<string | null>(null);
+   336→  const [photoSettings, setPhotoSettings] = useState<PhotoSettings>(DEFAULT_PHOTO_SETTINGS);
+   337→  const [page, setPage] = useState(1);
+   338→  const [zoom, setZoom] = useState<"fit" | "100">("fit");
+   339→  const [showMargins, setShowMargins] = useState(false);
+   340→  const [printing, setPrinting] = useState(false);
+   341→  const [duplexAssist, setDuplexAssist] = useState<DuplexAssist | null>(null);
+   342→  const [spooler, setSpooler] = useState<SpoolerState>({
+   343→    state: "checking",
+   344→    info: null,
+   345→  });
+   346→
+   347→  const activeFile = useMemo(
+   348→    () => files.find((f) => f.id === activeId) ?? null,
+   349→    [files, activeId],
+   350→  );
+   351→  const activeFileRef = useRef(activeFile);
+   352→  activeFileRef.current = activeFile;
+   353→  const settingsRef = useRef(settings);
+   354→  settingsRef.current = settings;
+   355→  const filesRef = useRef(files);
+   356→  filesRef.current = files;
+   357→  const photoModeRef = useRef(photoMode);
+   358→  photoModeRef.current = photoMode;
+   359→  const photoPlacementsRef = useRef(photoPlacements);
+   360→  photoPlacementsRef.current = photoPlacements;
+   361→  const photoSelectedIdRef = useRef(photoSelectedId);
+   362→  photoSelectedIdRef.current = photoSelectedId;
+   363→  const photoSettingsRef = useRef(photoSettings);
+   364→  photoSettingsRef.current = photoSettings;
+   365→
+   366→  // -- derived paper geometry -----------------------------------------------
+   367→  const paper = getPaper(settings.paperId);
+   368→  const { wMm: paperWmm, hMm: paperHmm } = paperDims(
+   369→    settings.paperId,
+   370→    settings.orientation,
+   371→  );
+   372→  const paperDimsRef = useRef({ wMm: paperWmm, hMm: paperHmm });
+   373→  paperDimsRef.current = { wMm: paperWmm, hMm: paperHmm };
+   374→  // Assigned after the photo actions below — used by addFiles to auto-place images.
+   375→  const placeImageRef = useRef<(itemId: string) => void>(() => {});
+   376→
+   377→  const contentScale = useMemo(() => {
+   378→    const f = activeFile;
+   379→    if (!f || f.docWidthMm == null || f.docWidthMm <= 0) return 1;
+   380→    if (settings.scaleMode !== "fit" || f.continuous) return 1;
+   381→    const paperW = paperWmm;
+   382→    const paperH = paperHmm;
+   383→    return Math.min(paperW / f.docWidthMm, paperH / (f.docHeightMm || 1));
+   384→  }, [activeFile, settings.scaleMode, paperWmm, paperHmm]);
+   385→
+   386→  const paperMismatch = useMemo(() => {
+   387→    const f = activeFile;
+   388→    if (!f || f.docWidthMm == null || f.continuous) return false;
+   389→    return matchPaper(f.docWidthMm, f.docHeightMm ?? 0) !== settings.paperId;
+   390→  }, [activeFile, settings.paperId]);
+   391→
+   392→  const contentOverflows = useMemo(() => {
+   393→    const f = activeFile;
+   394→    if (!f || f.docWidthMm == null || f.continuous) return false;
+   395→    const s = settings.scaleMode === "fit" ? contentScale : 1;
+   396→    return (
+   397→      f.docWidthMm * s > paperWmm + 0.5 || (f.docHeightMm ?? 0) * s > paperHmm + 0.5
+   398→    );
+   399→  }, [activeFile, contentScale, settings.scaleMode, paperWmm, paperHmm]);
+   400→
+   401→  // -- page range -------------------------------------------------------------
+   402→  const selectedPages = useMemo(() => {
+   403→    const f = activeFile;
+   404→    if (!f || f.status !== "ready" || !f.pageCount) return [];
+   405→    if (settings.rangeMode === "all") {
+   406→      return Array.from({ length: f.pageCount }, (_, i) => i + 1);
+   407→    }
+   408→    const parsed = parsePageRange(settings.rangeText, f.pageCount);
+   409→    return parsed.valid ? parsed.pages : [];
+   410→  }, [activeFile, settings.rangeMode, settings.rangeText]);
+   411→
+   412→  const rangeInvalid =
+   413→    settings.rangeMode === "custom" &&
+   414→    !parsePageRange(settings.rangeText, activeFile?.pageCount ?? 1).valid;
+   415→
+   416→  const selectedPagesRef = useRef<number[]>([]);
+   417→  selectedPagesRef.current = selectedPages;
+   418→
+   419→  const photoReady =
+   420→    photoPlacements.length > 0 &&
+   421→    photoPlacements.every((p) => {
+   422→      const it = files.find((f) => f.id === p.itemId);
+   423→      return !!it && it.kind === "image" && it.status === "ready" && !!it.url;
+   424→    });
+   425→  const photoPreset = getPhotoPreset(photoSettings.presetId);
+   426→  const photoSelected =
+   427→    photoPlacements.find((p) => p.id === photoSelectedId) ?? null;
+   428→  const photoBeyondMargin = photoPlacements.some((p) => {
+   429→    const bb = placementBBox(p);
+   430→    return (
+   431→      bb.x < photoSettings.marginMm - PHOTO_TOL ||
+   432→      bb.y < photoSettings.marginMm - PHOTO_TOL ||
+   433→      bb.x + bb.w > paperWmm - photoSettings.marginMm + PHOTO_TOL ||
+   434→      bb.y + bb.h > paperHmm - photoSettings.marginMm + PHOTO_TOL
+   435→    );
+   436→  });
+   437→
+   438→  const canPrint = photoMode
+   439→    ? photoReady && !printing
+   440→    : !!activeFile &&
+   441→      activeFile.status === "ready" &&
+   442→      selectedPages.length > 0 &&
+   443→      !printing;
+   444→
+   445→  // -- spooler detection ------------------------------------------------------
+   446→  useEffect(() => {
+   447→    let alive = true;
+   448→    fetch("/api/print")
+   449→      .then((r) => r.json())
+   450→      .then((body: { spooler: { type: "ipp" | "lp"; printer: string | null } | null }) => {
+   451→        if (!alive) return;
+   452→        setSpooler(
+   453→          body.spooler
+   454→            ? { state: "available", info: body.spooler }
+   455→            : { state: "unavailable", info: null },
+   456→        );
+   457→      })
+   458→      .catch(() => alive && setSpooler({ state: "unavailable", info: null }));
+   459→    return () => {
+   460→      alive = false;
+   461→    };
+   462→  }, []);
+   463→
+   464→  // -- auto-fit to loaded tray ------------------------------------------------
+   465→  const autoFitKey = useRef<string | null>(null);
+   466→  useEffect(() => {
+   467→    const f = activeFile;
+   468→    if (!f || f.status !== "ready" || f.docWidthMm == null || f.continuous) return;
+   469→    const key = `${f.id}:${settings.paperId}`;
+   470→    if (autoFitKey.current === key) return;
+   471→    const matched = matchPaper(f.docWidthMm, f.docHeightMm ?? 0);
+   472→    if (matched !== settings.paperId) {
+   473→      autoFitKey.current = key;
+   474→      setSettings((s) => (s.scaleMode === "fit" ? s : { ...s, scaleMode: "fit" }));
+   475→    }
+   476→  }, [activeFile, settings.paperId]);
+   477→
+   478→  // -- file intake ------------------------------------------------------------
+   479→  const patchFile = useCallback((id: string, patch: Partial<LoadedFile>) => {
+   480→    setFiles((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+   481→  }, []);
+   482→
+   483→  const addFiles = useCallback(
+   484→    (incoming: File[]) => {
+   485→      for (const file of incoming) {
+   486→        const ext = (file.name.split(".").pop() ?? "").toLowerCase();
+   487→        const accepted = ACCEPTED_EXT[ext];
+   488→        if (!accepted) {
+   489→          toast.error(`Format .${ext || "?"} tidak didukung.`, {
+   490→            description: `${file.name} — gunakan PDF, DOC, DOCX, PNG, atau JPG.`,
+   491→          });
+   492→          continue;
+   493→        }
+   494→        if (file.size > MAX_FILE_BYTES) {
+   495→          toast.error(`Ukuran file melebihi 50 MB.`, {
+   496→            description: file.name,
+   497→          });
+   498→          continue;
+   499→        }
+   500→        const id = newId();
+   501→        const loaded: LoadedFile = {
+   502→          id,
+   503→          name: file.name,
+   504→          ext,
+   505→          sizeBytes: file.size,
+   506→          kind: accepted.kind,
+   507→          mime: accepted.mime,
+   508→          bytes: null,
+   509→          url: null,
+   510→          status: "loading",
+   511→          pageCount: null,
+   512→          docWidthMm: null,
+   513→          docHeightMm: null,
+   514→          docLabel: null,
+   515→        };
+   516→        setFiles((prev) => [...prev, loaded]);
+   517→        setActiveId((cur) => cur ?? id);
+   518→        setPage(1);
+   519→
+   520→        file
+   521→          .arrayBuffer()
+   522→          .then(async (buf) => {
+   523→            const bytes = new Uint8Array(buf);
+   524→            patchFile(id, { bytes });
+   525→            const probe: LoadedFile = { ...loaded, bytes };
+   526→            const patch =
+   527→              accepted.kind === "pdf"
+   528→                ? await inspectPdf(probe)
+   529→                : accepted.kind === "image"
+   530→                  ? await inspectImage(probe)
+   531→                  : await inspectWord(probe);
+   532→            patchFile(id, patch);
+   533→            if (patch.status === "ready" && accepted.kind === "image" && photoModeRef.current) {
+   534→              placeImageRef.current(id);
+   535→            }
+   536→            if (patch.status === "error" && patch.error) {
+   537→              toast.error("Dokumen tidak dapat dibuka", {
+   538→                description: `${file.name} — ${patch.error}`,
+   539→              });
+   540→            }
+   541→          })
+   542→          .catch(() => {
+   543→            patchFile(id, {
+   544→              status: "error",
+   545→              error: "Gagal membaca file dari disk.",
+   546→            });
+   547→          });
+   548→      }
+   549→    },
+   550→    [patchFile],
+   551→  );
+   552→
+   553→  const removeFile = useCallback(
+   554→    (id: string) => {
+   555→      const task = pdfTaskCache.get(id);
+   556→      if (task) {
+   557→        task.then((t) => t.destroy()).catch(() => {});
+   558→        pdfTaskCache.delete(id);
+   559→      }
+   560→      docxRenderCache.delete(id);
+   561→      docHtmlCache.delete(id);
+   562→      const file = files.find((f) => f.id === id);
+   563→      if (file?.url) URL.revokeObjectURL(file.url);
+   564→      const next = files.filter((f) => f.id !== id);
+   565→      setFiles(next);
+   566→      // Purge photo placements referencing the removed file.
+   567→      const nextPlacements = photoPlacementsRef.current.filter(
+   568→        (p) => p.itemId !== id,
+   569→      );
+   570→      setPhotoPlacements(nextPlacements);
+   571→      setPhotoSelectedId((cur) =>
+   572→        cur && nextPlacements.some((p) => p.id === cur) ? cur : null,
+   573→      );
+   574→      if (id === activeId) {
+   575→        const fallback = next.find((f) => f.status === "ready") ?? next[0] ?? null;
+   576→        setActiveId(fallback ? fallback.id : null);
+   577→        setPage(1);
+   578→      }
+   579→    },
+   580→    [files, activeId],
+   581→  );
+   582→
+   583→  const selectFile = useCallback((id: string) => {
+   584→    setActiveId(id);
+   585→    setPage(1);
+   586→  }, []);
+   587→
+   588→  const setSetting = useCallback(
+   589→    <K extends keyof PrintSettings>(key: K, value: PrintSettings[K]) => {
+   590→      setSettings((s) => ({ ...s, [key]: value }));
+   591→    },
+   592→    [],
+   593→  );
+   594→
+   595→  // --------------------------------------------------------------------------
+   596→  // Photo layout mode (Mode Foto — Word-like sheet editor)
+   597→  // --------------------------------------------------------------------------
+   598→
+   599→  const setPhotoMode = useCallback((next: boolean) => {
+   600→    setPhotoModeState(next);
+   601→    if (next && photoPlacementsRef.current.length === 0) {
+   602→      const images = filesRef.current.filter(
+   603→        (f) => f.kind === "image" && f.status === "ready" && !!f.url,
+   604→      );
+   605→      for (const img of images) placeImageRef.current(img.id);
+   606→    }
+   607→    if (!next) setPhotoSelectedId(null);
+   608→  }, []);
+   609→
+   610→  const selectPhotoPlacement = useCallback((id: string | null) => {
+   611→    setPhotoSelectedId(id);
+   612→  }, []);
+   613→
+   614→  const setPhotoSetting = useCallback((patch: Partial<PhotoSettings>) => {
+   615→    setPhotoSettings((s) => ({
+   616→      ...s,
+   617→      ...patch,
+   618→      marginMm: patch.marginMm !== undefined
+   619→        ? Math.min(Math.max(patch.marginMm, 0), 30)
+   620→        : s.marginMm,
+   621→      gapMm: patch.gapMm !== undefined
+   622→        ? Math.min(Math.max(patch.gapMm, 0), 20)
+   623→        : s.gapMm,
+   624→    }));
+   625→  }, []);
+   626→
+   627→  /** Place an uploaded image on the sheet at its current preset size. */
+   628→  const placeImageOnSheet = useCallback((itemId: string) => {
+   629→    const ps = photoSettingsRef.current;
+   630→    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+   631→    const preset = getPhotoPreset(ps.presetId);
+   632→    const w = Math.min(preset.group === "custom" ? ps.customWMm : preset.wMm, paperW);
+   633→    const h = Math.min(preset.group === "custom" ? ps.customHMm : preset.hMm, paperH);
+   634→    const id = newPhotoId();
+   635→    setPhotoPlacements((list) => {
+   636→      if (list.length >= MAX_PLACEMENTS) return list;
+   637→      const maxBottom = list.reduce((m, p) => Math.max(m, p.yMm + p.hMm), 0);
+   638→      let y = list.length === 0 ? ps.marginMm : maxBottom + ps.gapMm;
+   639→      if (y + h > paperH) y = ps.marginMm;
+   640→      const placement: PhotoPlacement = {
+   641→        id,
+   642→        itemId,
+   643→        xMm: (paperW - w) / 2,
+   644→        yMm: y,
+   645→        wMm: w,
+   646→        hMm: h,
+   647→        rotation: 0,
+   648→        fit: "cover",
+   649→      };
+   650→      return [...list, clampPlacement(placement, paperW, paperH)];
+   651→    });
+   652→    setPhotoSelectedId(id);
+   653→  }, []);
+   654→  placeImageRef.current = placeImageOnSheet;
+   655→
+   656→  /** Add every ready, not-yet-placed image to the sheet. */
+   657→  const addAllImagesToSheet = useCallback(() => {
+   658→    const placed = new Set(photoPlacementsRef.current.map((p) => p.itemId));
+   659→    const images = filesRef.current.filter(
+   660→      (f) => f.kind === "image" && f.status === "ready" && !!f.url && !placed.has(f.id),
+   661→    );
+   662→    if (images.length === 0) return;
+   663→    for (const img of images) placeImageOnSheet(img.id);
+   664→    toast.success(`${images.length} foto ditambahkan ke lembar.`, {
+   665→      description: "Atur posisi & ukuran langsung pada lembar.",
+   666→    });
+   667→  }, [placeImageOnSheet]);
+   668→
+   669→  const updatePhotoPlacement = useCallback(
+   670→    (id: string, patch: Partial<PhotoPlacement>) => {
+   671→      const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+   672→      setPhotoPlacements((list) =>
+   673→        list.map((p) => {
+   674→          if (p.id !== id) return p;
+   675→          const next = { ...p, ...patch };
+   676→          next.wMm = Math.min(Math.max(next.wMm, MIN_PHOTO_MM), paperW);
+   677→          next.hMm = Math.min(Math.max(next.hMm, MIN_PHOTO_MM), paperH);
+   678→          next.rotation = normRotation(next.rotation);
+   679→          return clampPlacement(next, paperW, paperH);
+   680→        }),
+   681→      );
+   682→    },
+   683→    [],
+   684→  );
+   685→
+   686→  const removePhotoPlacement = useCallback((id: string) => {
+   687→    setPhotoPlacements((list) => list.filter((p) => p.id !== id));
+   688→    setPhotoSelectedId((cur) => (cur === id ? null : cur));
+   689→  }, []);
+   690→
+   691→  const duplicatePhotoPlacement = useCallback((id: string) => {
+   692→    const list = photoPlacementsRef.current;
+   693→    if (list.length >= MAX_PLACEMENTS) return;
+   694→    const src = list.find((p) => p.id === id);
+   695→    if (!src) return;
+   696→    const copy: PhotoPlacement = {
+   697→      ...src,
+   698→      id: newPhotoId(),
+   699→      xMm: src.xMm + 3,
+   700→      yMm: src.yMm + 3,
+   701→    };
+   702→    const idx = list.findIndex((p) => p.id === id);
+   703→    const next = [...list];
+   704→    next.splice(idx + 1, 0, clampPlacement(copy, paperDimsRef.current.wMm, paperDimsRef.current.hMm));
+   705→    setPhotoPlacements(next);
+   706→    setPhotoSelectedId(copy.id);
+   707→  }, []);
+   708→
+   709→  const clearPhotoPlacements = useCallback(() => {
+   710→    setPhotoPlacements([]);
+   711→    setPhotoSelectedId(null);
+   712→  }, []);
+   713→
+   714→  /** Apply a photo size preset to the selected placement (or all when none). */
+   715→  const applyPhotoPreset = useCallback(
+   716→    (presetId: string, customDims?: { wMm: number; hMm: number }) => {
+   717→      const ps = photoSettingsRef.current;
+   718→      const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+   719→      setPhotoSettings((s) => ({
+   720→        ...s,
+   721→        presetId,
+   722→        ...(customDims
+   723→          ? { customWMm: customDims.wMm, customHMm: customDims.hMm }
+   724→          : {}),
+   725→      }));
+   726→      const preset = getPhotoPreset(presetId);
+   727→      const w = Math.min(
+   728→        customDims
+   729→          ? customDims.wMm
+   730→          : preset.group === "custom"
+   731→            ? ps.customWMm
+   732→            : preset.wMm,
+   733→        paperW,
+   734→      );
+   735→      const h = Math.min(
+   736→        customDims
+   737→          ? customDims.hMm
+   738→          : preset.group === "custom"
+   739→            ? ps.customHMm
+   740→            : preset.hMm,
+   741→        paperH,
+   742→      );
+   743→      const selId = photoSelectedIdRef.current;
+   744→      setPhotoPlacements((list) =>
+   745→        list.map((p) => {
+   746→          if (selId && p.id !== selId) return p;
+   747→          const cx = p.xMm + p.wMm / 2;
+   748→          const cy = p.yMm + p.hMm / 2;
+   749→          return clampPlacement(
+   750→            { ...p, wMm: w, hMm: h, xMm: cx - w / 2, yMm: cy - h / 2 },
+   751→            paperW,
+   752→            paperH,
+   753→          );
+   754→        }),
+   755→      );
+   756→    },
+   757→    [],
+   758→  );
+   759→
+   760→  /** Fill the whole sheet with copies of the selected photo (pas-foto sheets). */
+   761→  const fillPhotoSheet = useCallback(() => {
+   762→    const list = photoPlacementsRef.current;
+   763→    if (list.length === 0) return;
+   764→    const selId = photoSelectedIdRef.current;
+   765→    const p = list.find((x) => x.id === selId) ?? list[0];
+   766→    const ps = photoSettingsRef.current;
+   767→    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+   768→    const margin = ps.marginMm;
+   769→    const gap = ps.gapMm;
+   770→    const printW = paperW - 2 * margin;
+   771→    const printH = paperH - 2 * margin;
+   772→    const bb = placementBBox(p);
+   773→    if (bb.w > printW + PHOTO_TOL || bb.h > printH + PHOTO_TOL) {
+   774→      toast.error("Foto lebih besar dari area cetak.", {
+   775→        description: "Perkecil ukuran foto atau margin lembar terlebih dahulu.",
+   776→      });
+   777→      return;
+   778→    }
+   779→    const cols = Math.max(1, Math.floor((printW + gap) / (bb.w + gap)));
+   780→    const rowsBase = Math.max(1, Math.floor((printH + gap) / (bb.h + gap)));
+   781→    const rows =
+   782→      cols * rowsBase > MAX_PLACEMENTS
+   783→        ? Math.max(1, Math.floor(MAX_PLACEMENTS / cols))
+   784→        : rowsBase;
+   785→    const gx = (printW - (cols * bb.w + (cols - 1) * gap)) / 2;
+   786→    const gy = (printH - (rows * bb.h + (rows - 1) * gap)) / 2;
+   787→    const out: PhotoPlacement[] = [];
+   788→    for (let r = 0; r < rows; r++) {
+   789→      for (let c = 0; c < cols; c++) {
+   790→        const vx = margin + gx + c * (bb.w + gap);
+   791→        const vy = margin + gy + r * (bb.h + gap);
+   792→        out.push({
+   793→          id: newPhotoId(),
+   794→          itemId: p.itemId,
+   795→          xMm: vx + bb.w / 2 - p.wMm / 2,
+   796→          yMm: vy + bb.h / 2 - p.hMm / 2,
+   797→          wMm: p.wMm,
+   798→          hMm: p.hMm,
+   799→          rotation: p.rotation,
+   800→          fit: p.fit,
+   801→        });
+   802→      }
+   803→    }
+   804→    setPhotoPlacements(out.map((pl) => clampPlacement(pl, paperW, paperH)));
+   805→    setPhotoSelectedId(null);
+   806→    toast.success(`Lembar terisi — ${cols} × ${rows} foto (${out.length} salinan).`);
+   807→  }, []);
+   808→
+   809→  /** Tidy the sheet: pack every placement into rows within the printable area. */
+   810→  const autoArrangePhotos = useCallback(() => {
+   811→    const list = photoPlacementsRef.current;
+   812→    if (list.length === 0) return;
+   813→    const ps = photoSettingsRef.current;
+   814→    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+   815→    const margin = ps.marginMm;
+   816→    const gap = ps.gapMm;
+   817→    const printW = paperW - 2 * margin;
+   818→    let x = margin;
+   819→    let y = margin;
+   820→    let rowH = 0;
+   821→    const out = list.map((p) => {
+   822→      const bb = placementBBox(p);
+   823→      const w = Math.min(bb.w, printW);
+   824→      if (x > margin && x + w > margin + printW + PHOTO_TOL) {
+   825→        x = margin;
+   826→        y += rowH + gap;
+   827→        rowH = 0;
+   828→      }
+   829→      const cx = x + bb.w / 2;
+   830→      const cy = y + bb.h / 2;
+   831→      const np = { ...p, xMm: cx - p.wMm / 2, yMm: cy - p.hMm / 2 };
+   832→      x += bb.w + gap;
+   833→      rowH = Math.max(rowH, bb.h);
+   834→      return np;
+   835→    });
+   836→    setPhotoPlacements(out.map((pl) => clampPlacement(pl, paperW, paperH)));
+   837→  }, []);
+   838→
+   839→  /** Align the selected placement within the printable area (Word-like). */
+   840→  const alignPhotoPlacement = useCallback((dir: PhotoAlign) => {
+   841→    const list = photoPlacementsRef.current;
+   842→    const selId = photoSelectedIdRef.current;
+   843→    const p = list.find((x) => x.id === selId);
+   844→    if (!p) return;
+   845→    const ps = photoSettingsRef.current;
+   846→    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+   847→    const bb = placementBBox(p);
+   848→    let cx = p.xMm + p.wMm / 2;
+   849→    let cy = p.yMm + p.hMm / 2;
+   850→    if (dir === "left") cx = ps.marginMm + bb.w / 2;
+   851→    if (dir === "centerX") cx = paperW / 2;
+   852→    if (dir === "right") cx = paperW - ps.marginMm - bb.w / 2;
+   853→    if (dir === "top") cy = ps.marginMm + bb.h / 2;
+   854→    if (dir === "centerY") cy = paperH / 2;
+   855→    if (dir === "bottom") cy = paperH - ps.marginMm - bb.h / 2;
+   856→    updatePhotoPlacement(p.id, {
+   857→      xMm: cx - p.wMm / 2,
+   858→      yMm: cy - p.hMm / 2,
+   859→    });
+   860→  }, [updatePhotoPlacement]);
+   861→
+   862→  // -- photo print execution ---------------------------------------------------
+   863→  const printPhotoLayout = useCallback(async () => {
+   864→    const s = settingsRef.current;
+   865→    const ps = photoSettingsRef.current;
+   866→    const placements = photoPlacementsRef.current;
+   867→    if (placements.length === 0) return;
+   868→    const dims = paperDims(s.paperId, s.orientation);
+   869→    const spec: PhotoSheetSpec = {
+   870→      paperWmm: dims.wMm,
+   871→      paperHmm: dims.hMm,
+   872→      placements,
+   873→      resolveImage: (itemId) =>
+   874→        filesRef.current.find((f) => f.id === itemId && f.kind === "image")?.url ??
+   875→        null,
+   876→      colorMode: s.colorMode,
+   877→      cutLines: ps.cutLines,
+   878→    };
+   879→    if (s.printMode === "spooler") {
+   880→      const canvas = await renderPhotoSheetCanvas(spec);
+   881→      const data = canvas.toDataURL("image/png").split(",")[1] ?? "";
+   882→      const res = await fetch("/api/print", {
+   883→        method: "POST",
+   884→        headers: { "Content-Type": "application/json" },
+   885→        body: JSON.stringify({
+   886→          job: {
+   887→            fileName: "Layout-Foto-Epson.png",
+   888→            mime: "image/png",
+   889→            kind: "image",
+   890→            paperId: s.paperId,
+   891→            ippMedia: getPaper(s.paperId).ippMedia,
+   892→            paperWmm: dims.wMm,
+   893→            paperHmm: dims.hMm,
+   894→            orientation: "portrait",
+   895→            colorMode: s.colorMode,
+   896→            quality: s.quality,
+   897→            copies: s.copies,
+   898→            duplex: false,
+   899→            scaleMode: "original",
+   900→            pages: [1],
+   901→          },
+   902→          data,
+   903→        }),
+   904→      });
+   905→      const body = (await res.json().catch(() => null)) as
+   906→        | { ok?: boolean; jobId?: string; message?: string; spooler?: string }
+   907→        | null;
+   908→      if (!res.ok || !body?.ok) {
+   909→        toast.error("Direct Spooler menolak pekerjaan cetak", {
+   910→          description: body?.message ?? "Spooler lokal tidak tersedia.",
+   911→        });
+   912→        return;
+   913→      }
+   914→      toast.success("Pekerjaan cetak foto terkirim", {
+   915→        description: `${body.spooler ?? "spooler"} • job ${body.jobId ?? "-"}`,
+   916→      });
+   917→      return;
+   918→    }
+   919→    await printPhotoViaBrowser(spec, s.copies);
+   920→  }, []);
+   921→
+   922→  // -- estimated page count for continuous HTML documents ---------------------
+   923→  const reportEstimatedPages = useCallback(
+   924→    (fileId: string, pages: number) => {
+   925→      setFiles((prev) =>
+   926→        prev.map((f) =>
+   927→          f.id === fileId && f.continuous && f.pageCount !== pages
+   928→            ? { ...f, pageCount: pages }
+   929→            : f,
+   930→        ),
+   931→      );
+   932→    },
+   933→    [],
+   934→  );
+   935→
+   936→  // -- print execution --------------------------------------------------------
+   937→  const buildPrintRequest = useCallback(
+   938→    (pages: number[]) => {
+   939→      const f = activeFileRef.current;
+   940→      const s = settingsRef.current;
+   941→      if (!f) return null;
+   942→      return {
+   943→        file: f,
+   944→        paperWmm: paperDims(s.paperId, s.orientation).wMm,
+   945→        paperHmm: paperDims(s.paperId, s.orientation).hMm,
+   946→        scaleMode: s.scaleMode,
+   947→        colorMode: s.colorMode,
+   948→        pages,
+   949→        copies: s.copies,
+   950→        getPdfDoc: () => loadPdfDoc(f),
+   951→        getDocxRender: () => renderDocx(f),
+   952→        getDocHtml: () => convertViaServer(f),
+   953→      };
+   954→    },
+   955→    [],
+   956→  );
+   957→
+   958→  const printPages = useCallback(async (pages: number[]) => {
+   959→    const req = buildPrintRequest(pages);
+   960→    if (!req) return;
+   961→    await printViaBrowser(req);
+   962→  }, [buildPrintRequest]);
+   963→
+   964→  const spoolPrint = useCallback(async () => {
+   965→    const f = activeFileRef.current;
+   966→    const s = settingsRef.current;
+   967→    const pages = selectedPagesRef.current;
+   968→    if (!f || !f.bytes) return;
+   969→    const dims = paperDims(s.paperId, s.orientation);
+   970→    const res = await fetch("/api/print", {
+   971→      method: "POST",
+   972→      headers: { "Content-Type": "application/json" },
+   973→      body: JSON.stringify({
+   974→        job: {
+   975→          fileName: f.name,
+   976→          mime: f.mime,
+   977→          kind: f.kind,
+   978→          paperId: s.paperId,
+   979→          ippMedia: getPaper(s.paperId).ippMedia,
+   980→          paperWmm: dims.wMm,
+   981→          paperHmm: dims.hMm,
+   982→          orientation: s.orientation,
+   983→          colorMode: s.colorMode,
+   984→          quality: s.quality,
+   985→          copies: s.copies,
+   986→          duplex: s.duplex,
+   987→          scaleMode: s.scaleMode,
+   988→          pages,
+   989→        },
+   990→        data: toBase64(f.bytes),
+   991→      }),
+   992→    });
+   993→    const body = (await res.json().catch(() => null)) as
+   994→      | { ok?: boolean; jobId?: string; message?: string; spooler?: string }
+   995→      | null;
+   996→    if (!res.ok || !body?.ok) {
+   997→      toast.error("Direct Spooler menolak pekerjaan cetak", {
+   998→        description: body?.message ?? "Spooler lokal tidak tersedia.",
+   999→      });
+  1000→      return;
+  1001→    }
+  1002→    toast.success("Pekerjaan cetak terkirim", {
+  1003→      description: `${body.spooler ?? "spooler"} • job ${body.jobId ?? "-"}`,
+  1004→    });
+  1005→  }, []);
+  1006→
+  1007→  const triggerPrint = useCallback(async () => {
+  1008→    // Photo layout mode has its own print pipeline (single rasterized sheet).
+  1009→    if (photoModeRef.current) {
+  1010→      if (printing || photoPlacementsRef.current.length === 0) return;
+  1011→      setPrinting(true);
+  1012→      try {
+  1013→        await printPhotoLayout();
+  1014→      } catch (err) {
+  1015→        toast.error("Cetak foto gagal", {
+  1016→          description: err instanceof Error ? err.message : "Kesalahan tidak diketahui.",
+  1017→        });
+  1018→      } finally {
+  1019→        setPrinting(false);
+  1020→      }
+  1021→      return;
+  1022→    }
+  1023→    const f = activeFileRef.current;
+  1024→    const s = settingsRef.current;
+  1025→    const pages = selectedPagesRef.current;
+  1026→    if (!f || f.status !== "ready" || pages.length === 0 || printing) return;
+  1027→
+  1028→    setPrinting(true);
+  1029→    try {
+  1030→      if (s.printMode === "spooler") {
+  1031→        await spoolPrint();
+  1032→        return;
+  1033→      }
+  1034→      // Manual duplex: pass 1 = odd pages, pass 2 (user-driven) = even pages reversed
+  1035→      if (s.duplex && pages.length > 1) {
+  1036→        const odd = pages.filter((p) => p % 2 === 1);
+  1037→        await printPages(odd.length > 0 ? odd : pages);
+  1038→        const even = pages.filter((p) => p % 2 === 0).reverse();
+  1039→        if (even.length > 0) setDuplexAssist({ evenPages: even });
+  1040→        return;
+  1041→      }
+  1042→      await printPages(pages);
+  1043→    } catch (err) {
+  1044→      toast.error("Cetak gagal", {
+  1045→        description: err instanceof Error ? err.message : "Kesalahan tidak diketahui.",
+  1046→      });
+  1047→    } finally {
+  1048→      setPrinting(false);
+  1049→    }
+  1050→  }, [printing, printPages, spoolPrint, printPhotoLayout]);
+  1051→
+  1052→  const printEvenPass = useCallback(async () => {
+  1053→    if (!duplexAssist) return;
+  1054→    setPrinting(true);
+  1055→    try {
+  1056→      await printPages(duplexAssist.evenPages);
+  1057→    } catch (err) {
+  1058→      toast.error("Cetak sisi genap gagal", {
+  1059→        description: err instanceof Error ? err.message : "Kesalahan tidak diketahui.",
+  1060→      });
+  1061→    } finally {
+  1062→      setPrinting(false);
+  1063→      setDuplexAssist(null);
+  1064→    }
+  1065→  }, [duplexAssist, printPages]);
+  1066→
+  1067→  const cancelDuplex = useCallback(() => setDuplexAssist(null), []);
+  1068→
+  1069→  // Ctrl+P / Cmd+P shortcut
+  1070→  const triggerRef = useRef(triggerPrint);
+  1071→  triggerRef.current = triggerPrint;
+  1072→  useEffect(() => {
+  1073→    const handler = (e: KeyboardEvent) => {
+  1074→      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") {
+  1075→        e.preventDefault();
+  1076→        void triggerRef.current();
+  1077→      }
+  1078→    };
+  1079→    window.addEventListener("keydown", handler);
+  1080→    return () => window.removeEventListener("keydown", handler);
+  1081→  }, []);
+  1082→
+  1083→  const loadSamples = useCallback(async () => {
+  1084→    try {
+  1085→      const samples: Array<[string, string]> = [
+  1086→        ["/samples/sample-letter.pdf", "Surat-Kwitansi-Letter.pdf"],
+  1087→        ["/samples/sample-warna.png", "Grafik-Warna.png"],
+  1088→        ["/samples/sample-dokumen.docx", "Laporan-Dokumen.docx"],
+  1089→      ];
+  1090→      const fetched: File[] = [];
+  1091→      for (const [url, name] of samples) {
+  1092→        const res = await fetch(url);
+  1093→        if (!res.ok) continue;
+  1094→        const buf = await res.arrayBuffer();
+  1095→        const ext = name.split(".").pop()!.toLowerCase();
+  1096→        const mime =
+  1097→          ext === "pdf"
+  1098→            ? "application/pdf"
+  1099→            : ext === "png"
+  1100→              ? "image/png"
+  1101→              : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  1102→        fetched.push(new File([buf], name, { type: mime }));
+  1103→      }
+  1104→      if (fetched.length > 0) addFiles(fetched);
+  1105→    } catch {
+  1106→      toast.error("Contoh dokumen tidak dapat dimuat.");
+  1107→    }
+  1108→  }, [addFiles]);
+  1109→
+  1110→  // clamp preview page
+  1111→  useEffect(() => {
+  1112→    const total = activeFile?.pageCount ?? 1;
+  1113→    if (page > total) setPage(Math.max(1, total));
+  1114→  }, [activeFile?.pageCount, page]);
+  1115→
+  1116→  const summary = useMemo(() => {
+  1117→    const paperShort = paper.shortLabel;
+  1118→    const color = settings.colorMode === "color" ? "Berwarna" : "Hitam Putih";
+  1119→    const copies = settings.copies;
+  1120→    if (photoMode) {
+  1121→      return `${photoPlacements.length} Foto • ${photoPreset.short} • ${paperShort} • ${color} • ${copies} Salinan`;
+  1122→    }
+  1123→    const pagesCount = selectedPages.length;
+  1124→    const base = `${paperShort} • ${color} • ${pagesCount} Hal × ${copies} Salinan`;
+  1125→    return settings.duplex ? `${base} • Bolak-Balik` : base;
+  1126→  }, [
+  1127→    photoMode,
+  1128→    photoPlacements.length,
+  1129→    photoPreset.short,
+  1130→    paper.shortLabel,
+  1131→    settings.colorMode,
+  1132→    settings.copies,
+  1133→    settings.duplex,
+  1134→    selectedPages.length,
+  1135→  ]);
+  1136→
+  1137→  return {
+  1138→    // state
+  1139→    files,
+  1140→    activeFile,
+  1141→    settings,
+  1142→    page,
+  1143→    zoom,
+  1144→    showMargins,
+  1145→    printing,
+  1146→    duplexAssist,
+  1147→    spooler,
+  1148→    paper,
+  1149→    paperWmm,
+  1150→    paperHmm,
+  1151→    contentScale,
+  1152→    paperMismatch,
+  1153→    contentOverflows,
+  1154→    selectedPages,
+  1155→    rangeInvalid,
+  1156→    canPrint,
+  1157→    summary,
+  1158→    // photo mode state & derived
+  1159→    photoMode,
+  1160→    photoPlacements,
+  1161→    photoSelectedId,
+  1162→    photoSettings,
+  1163→    photoPreset,
+  1164→    photoSelected,
+  1165→    photoReady,
+  1166→    photoBeyondMargin,
+  1167→    // actions
+  1168→    addFiles,
+  1169→    removeFile,
+  1170→    selectFile,
+  1171→    setSetting,
+  1172→    setPage,
+  1173→    setZoom,
+  1174→    setShowMargins,
+  1175→    triggerPrint,
+  1176→    printEvenPass,
+  1177→    cancelDuplex,
+  1178→    reportEstimatedPages,
+  1179→    loadSamples,
+  1180→    // photo actions
+  1181→    setPhotoMode,
+  1182→    setPhotoSetting,
+  1183→    applyPhotoPreset,
+  1184→    selectPhotoPlacement,
+  1185→    updatePhotoPlacement,
+  1186→    removePhotoPlacement,
+  1187→    duplicatePhotoPlacement,
+  1188→    clearPhotoPlacements,
+  1189→    fillPhotoSheet,
+  1190→    autoArrangePhotos,
+  1191→    alignPhotoPlacement,
+  1192→    addAllImagesToSheet,
+  1193→    // document accessors for renderers
+  1194→    getPdfDoc: loadPdfDoc,
+  1195→    getDocxRender: renderDocx,
+  1196→    getDocHtml: convertViaServer,
+  1197→  };
+  1198→}
+  1199→
+  1200→export type PrintStationStore = ReturnType<typeof usePrintStation>;
+  1201→

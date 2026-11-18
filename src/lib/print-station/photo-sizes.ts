@@ -150,6 +150,21 @@ export const PHOTO_PRESETS: PhotoPreset[] = [
 
 export const DEFAULT_PHOTO_PRESET_ID = "p-4r";
 
+/**
+ * One-tap quick chips for the most-ordered sizes at Indonesian print shops
+ * (pas foto + retail R series). Everything else stays reachable via the
+ * grouped select below the chips.
+ */
+export const PRESET_CHIPS: Array<{ id: string; label: string }> = [
+  { id: "pf-2x3", label: "2×3" },
+  { id: "pf-3x4", label: "3×4" },
+  { id: "pf-4x6", label: "4×6" },
+  { id: "p-3r", label: "3R" },
+  { id: "p-4r", label: "4R" },
+  { id: "p-5r", label: "5R" },
+  { id: "p-6r", label: "6R" },
+];
+
 export const PHOTO_GROUP_LABEL: Record<PhotoPresetGroup, string> = {
   pas: "Pas Foto",
   r: "Seri R (Kertas Foto)",

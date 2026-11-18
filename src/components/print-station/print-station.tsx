@@ -2,7 +2,7 @@
 
 // Epson Print Station — boot directly into the functional print workspace.
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { usePrintStation } from "@/hooks/use-print-station";
 import { TopBar, type WorkMode } from "./top-bar";
@@ -10,9 +10,24 @@ import { PreviewStage } from "./preview-stage";
 import { InspectorSidebar } from "./inspector-sidebar";
 import { PrintActionBar } from "./print-action-bar";
 
+const emptySubscribe = () => () => {};
+
 export function PrintStation() {
   const store = usePrintStation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // The workspace is a pure interactive tool (no SEO content). Rendering an
+  // identical shell until hydration completes keeps the SSR tree trivially in
+  // sync and eliminates the intermittent Radix Select aria-controls useId
+  // mismatch (server/client useId drift) reported on this workspace.
+  const mounted = useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false,
+  );
+
+  if (!mounted) {
+    return <div className="h-screen min-h-0 bg-[#F4F5F7]" aria-hidden="true" />;
+  }
 
   const handlePrintModeChange = (mode: "browser" | "spooler") => {
     store.setSetting("printMode", mode);
@@ -111,6 +126,7 @@ export function PrintStation() {
             paperWmm: store.paperWmm,
             paperHmm: store.paperHmm,
             beyondMargin: store.photoBeyondMargin,
+            capacity: store.photoCapacity,
             onSetting: store.setPhotoSetting,
             onPreset: store.applyPhotoPreset,
             onUpdateSelected: (patch) => {
@@ -120,6 +136,7 @@ export function PrintStation() {
             },
             onAlign: store.alignPhotoPlacement,
             onFillSheet: store.fillPhotoSheet,
+            onArrangeCount: store.arrangePhotoCopies,
             onArrange: store.autoArrangePhotos,
             onDuplicate: () => {
               if (store.photoSelected) {

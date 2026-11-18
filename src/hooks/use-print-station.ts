@@ -425,6 +425,28 @@ export function usePrintStation() {
   const photoPreset = getPhotoPreset(photoSettings.presetId);
   const photoSelected =
     photoPlacements.find((p) => p.id === photoSelectedId) ?? null;
+
+  /**
+   * Max copies of the current preset that fit on one sheet (best of portrait
+   * / landscape orientation), clamped by the engine's placement cap.
+   */
+  const photoCapacity = useMemo(() => {
+    const w = photoPreset.group === "custom" ? photoSettings.customWMm : photoPreset.wMm;
+    const h = photoPreset.group === "custom" ? photoSettings.customHMm : photoPreset.hMm;
+    const margin = photoSettings.marginMm;
+    const gap = photoSettings.gapMm;
+    const printW = paperWmm - 2 * margin;
+    const printH = paperHmm - 2 * margin;
+    const capFor = (pw: number, ph: number) => {
+      if (pw > printW + PHOTO_TOL || ph > printH + PHOTO_TOL) return 0;
+      return (
+        Math.max(1, Math.floor((printW + gap) / (pw + gap))) *
+        Math.max(1, Math.floor((printH + gap) / (ph + gap)))
+      );
+    };
+    return Math.min(Math.max(capFor(w, h), capFor(h, w)), MAX_PLACEMENTS);
+  }, [photoPreset, photoSettings, paperWmm, paperHmm]);
+
   const photoBeyondMargin = photoPlacements.some((p) => {
     const bb = placementBBox(p);
     return (
@@ -530,7 +552,11 @@ export function usePrintStation() {
                   ? await inspectImage(probe)
                   : await inspectWord(probe);
             patchFile(id, patch);
-            if (patch.status === "ready" && accepted.kind === "image" && photoModeRef.current) {
+            if (patch.status === "ready" && accepted.kind === "image") {
+              // Photo intake flow: uploading an image switches the workspace
+              // into photo mode and drops the photo on the sheet at the
+              // currently selected preset size.
+              setPhotoModeState(true);
               placeImageRef.current(id);
             }
             if (patch.status === "error" && patch.error) {
@@ -804,6 +830,87 @@ export function usePrintStation() {
     setPhotoPlacements(out.map((pl) => clampPlacement(pl, paperW, paperH)));
     setPhotoSelectedId(null);
     toast.success(`Lembar terisi — ${cols} × ${rows} foto (${out.length} salinan).`);
+  }, []);
+
+  /**
+   * Row-align exactly N copies of the selected (or first) photo, sized to the
+   * current preset — the print-shop "cetak 6 lembar pas foto" flow. The grid
+   * packs rows left-to-right, centers the last row and centers the whole block
+   * vertically inside the printable area. Orientation follows the preset;
+   * when the preset orientation cannot fit N copies but the rotated one can,
+   * the layout rotates automatically.
+   */
+  const arrangePhotoCopies = useCallback((count: number) => {
+    const list = photoPlacementsRef.current;
+    if (list.length === 0) return;
+    const selId = photoSelectedIdRef.current;
+    const src = list.find((x) => x.id === selId) ?? list[0];
+    const ps = photoSettingsRef.current;
+    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+    const preset = getPhotoPreset(ps.presetId);
+    const pw = Math.min(preset.group === "custom" ? ps.customWMm : preset.wMm, paperW);
+    const ph = Math.min(preset.group === "custom" ? ps.customHMm : preset.hMm, paperH);
+    const margin = ps.marginMm;
+    const gap = ps.gapMm;
+    const printW = paperW - 2 * margin;
+    const printH = paperH - 2 * margin;
+
+    const gridFor = (w: number, h: number) => {
+      if (w > printW + PHOTO_TOL || h > printH + PHOTO_TOL) {
+        return { cols: 0, cap: 0 };
+      }
+      const cols = Math.max(1, Math.floor((printW + gap) / (w + gap)));
+      const rows = Math.max(1, Math.floor((printH + gap) / (h + gap)));
+      return { cols, cap: cols * rows };
+    };
+
+    const portrait = gridFor(pw, ph);
+    const landscape = gridFor(ph, pw);
+    const n0 = Math.max(1, Math.round(count));
+    const useLandscape =
+      portrait.cap >= n0 ? false : landscape.cap >= n0 ? true : landscape.cap > portrait.cap;
+    const grid = useLandscape ? landscape : portrait;
+    if (grid.cap === 0) {
+      toast.error("Foto melebihi area cetak lembar.", {
+        description: "Kecilkan ukuran foto atau margin lembar, lalu susun ulang.",
+      });
+      return;
+    }
+    const total = Math.min(n0, grid.cap, MAX_PLACEMENTS);
+    const w = useLandscape ? ph : pw;
+    const h = useLandscape ? pw : ph;
+    const rows = Math.ceil(total / grid.cols);
+    const gy = (printH - (rows * h + (rows - 1) * gap)) / 2;
+    const out: PhotoPlacement[] = [];
+    for (let r = 0; r < rows; r++) {
+      const inRow = Math.min(total - r * grid.cols, grid.cols);
+      const rowW = inRow * w + (inRow - 1) * gap;
+      const gx = (printW - rowW) / 2;
+      for (let c = 0; c < inRow; c++) {
+        out.push({
+          id: newPhotoId(),
+          itemId: src.itemId,
+          xMm: margin + gx + c * (w + gap),
+          yMm: margin + gy + r * (h + gap),
+          wMm: w,
+          hMm: h,
+          rotation: 0,
+          fit: src.fit,
+        });
+      }
+    }
+    setPhotoPlacements(out);
+    setPhotoSelectedId(null);
+    if (n0 > grid.cap) {
+      toast.info(`Lembar penuh — maksimal ${grid.cap} foto ukuran ini`, {
+        description:
+          "Kurangi jumlah foto, pilih preset lebih kecil, atau ganti kertas lebih besar.",
+      });
+    } else {
+      toast.success(`${total} foto disusun otomatis`, {
+        description: `${useLandscape ? "Lanskap" : "Potret"} • ${grid.cols} kolom × ${rows} baris • jarak ${gap} mm`,
+      });
+    }
   }, []);
 
   /** Tidy the sheet: pack every placement into rows within the printable area. */
@@ -1164,6 +1271,7 @@ export function usePrintStation() {
     photoSelected,
     photoReady,
     photoBeyondMargin,
+    photoCapacity,
     // actions
     addFiles,
     removeFile,
@@ -1187,6 +1295,7 @@ export function usePrintStation() {
     duplicatePhotoPlacement,
     clearPhotoPlacements,
     fillPhotoSheet,
+    arrangePhotoCopies,
     autoArrangePhotos,
     alignPhotoPlacement,
     addAllImagesToSheet,

@@ -71,11 +71,15 @@ export interface PhotoPanelData {
   paperWmm: number;
   paperHmm: number;
   beyondMargin: boolean;
+  /** Max copies of the current preset that fit on one sheet. */
+  capacity: number;
   onSetting: (patch: Partial<PhotoSettings>) => void;
   onPreset: (id: string, customDims?: { wMm: number; hMm: number }) => void;
   onUpdateSelected: (patch: Partial<PhotoPlacement>) => void;
   onAlign: (dir: PhotoAlign) => void;
   onFillSheet: () => void;
+  /** Arrange exactly N preset-sized copies in a grid. */
+  onArrangeCount: (n: number) => void;
   onArrange: () => void;
   onDuplicate: () => void;
   onRemove: () => void;
@@ -267,11 +271,13 @@ function SidebarContent({
               paperWmm={photo.paperWmm}
               paperHmm={photo.paperHmm}
               beyondMargin={photo.beyondMargin}
+              capacity={photo.capacity}
               onSetting={photo.onSetting}
               onPreset={photo.onPreset}
               onUpdateSelected={photo.onUpdateSelected}
               onAlign={photo.onAlign}
               onFillSheet={photo.onFillSheet}
+              onArrangeCount={photo.onArrangeCount}
               onArrange={photo.onArrange}
               onDuplicate={photo.onDuplicate}
               onRemove={photo.onRemove}

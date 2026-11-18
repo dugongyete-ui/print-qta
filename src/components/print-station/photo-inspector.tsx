@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 // Photo-mode inspector: full photo size presets, Word-like position/size
 // numeric controls, sheet tools (fill / arrange / align / cut lines) and the
 // per-photo list of everything placed on the sheet.
@@ -15,6 +17,9 @@ import {
   Eraser,
   ImagePlus,
   LayoutGrid,
+  Minus,
+  Plus,
+  Rows3,
   Trash2,
   Wand2,
 } from "lucide-react";
@@ -23,6 +28,7 @@ import type { PhotoAlign } from "@/hooks/use-print-station";
 import {
   PHOTO_GROUP_LABEL,
   PHOTO_PRESETS,
+  PRESET_CHIPS,
   presetDimsLabel,
   type PhotoPreset,
   type PhotoPresetGroup,
@@ -161,11 +167,15 @@ interface PhotoInspectorProps {
   paperWmm: number;
   paperHmm: number;
   beyondMargin: boolean;
+  /** Max copies of the current preset that fit on one sheet. */
+  capacity: number;
   onSetting: (patch: Partial<PhotoSettings>) => void;
   onPreset: (id: string, customDims?: { wMm: number; hMm: number }) => void;
   onUpdateSelected: (patch: Partial<PhotoPlacement>) => void;
   onAlign: (dir: PhotoAlign) => void;
   onFillSheet: () => void;
+  /** Arrange exactly N preset-sized copies in a grid. */
+  onArrangeCount: (n: number) => void;
   onArrange: () => void;
   onDuplicate: () => void;
   onRemove: () => void;
@@ -176,6 +186,8 @@ interface PhotoInspectorProps {
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
 
+const COUNT_QUICK: number[] = [2, 4, 6, 8, 12];
+
 export function PhotoInspector({
   placements,
   selected,
@@ -185,11 +197,13 @@ export function PhotoInspector({
   paperWmm,
   paperHmm,
   beyondMargin,
+  capacity,
   onSetting,
   onPreset,
   onUpdateSelected,
   onAlign,
   onFillSheet,
+  onArrangeCount,
   onArrange,
   onDuplicate,
   onRemove,
@@ -197,6 +211,10 @@ export function PhotoInspector({
   onClear,
   onAddImages,
 }: PhotoInspectorProps) {
+  // Requested copy count for "Susun N Foto" — clamped to what actually fits.
+  const capSafe = Math.max(1, Math.min(capacity, 200));
+  const [count, setCount] = useState(6);
+  const n = Math.max(1, Math.min(count, capSafe));
   const placedIds = new Set(placements.map((p) => p.itemId));
   const unplacedImages = files.filter(
     (f) => f.kind === "image" && f.status === "ready" && !!f.url && !placedIds.has(f.id),
@@ -237,6 +255,26 @@ export function PhotoInspector({
             ))}
           </SelectContent>
         </Select>
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Preset ukuran cepat">
+          {PRESET_CHIPS.map((c) => {
+            const active = preset.id === c.id;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                aria-pressed={active}
+                onClick={() => onPreset(c.id)}
+                className={`h-7 rounded-md border px-2 font-mono text-[11px] font-medium tabular-nums transition-colors ${
+                  active
+                    ? "border-[#003399] bg-[#003399] text-white"
+                    : "border-[#E5E7EB] bg-white text-[#374151] hover:bg-[#F9FAFB]"
+                }`}
+              >
+                {c.label}
+              </button>
+            );
+          })}
+        </div>
         <p className="font-mono text-[10px] tabular-nums text-[#6B7280]">
           {presetDimsLabel(preset)} • {scopeLabel}
         </p>
@@ -403,15 +441,73 @@ export function PhotoInspector({
 
       {/* Susun & Lembar */}
       <Section title="Susun & Lembar">
+        <Row label="Jumlah Foto">
+          <div className="inline-flex items-center rounded-md border border-[#E5E7EB]">
+            <button
+              type="button"
+              aria-label="Kurangi jumlah foto"
+              disabled={n <= 1}
+              onClick={() => setCount((c) => Math.max(1, c - 1))}
+              className="flex h-8 w-8 items-center justify-center text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30 disabled:hover:bg-transparent"
+            >
+              <Minus size={13} strokeWidth={1.5} />
+            </button>
+            <span
+              className="w-10 border-x border-[#E5E7EB] text-center font-mono text-[12px] font-medium tabular-nums text-[#111827]"
+              aria-live="polite"
+            >
+              {n}
+            </span>
+            <button
+              type="button"
+              aria-label="Tambah jumlah foto"
+              disabled={n >= capSafe}
+              onClick={() => setCount((c) => Math.min(capSafe, c + 1))}
+              className="flex h-8 w-8 items-center justify-center text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30 disabled:hover:bg-transparent"
+            >
+              <Plus size={13} strokeWidth={1.5} />
+            </button>
+          </div>
+        </Row>
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Jumlah foto cepat">
+          {COUNT_QUICK.filter((q) => q <= capSafe).map((q) => (
+            <button
+              key={q}
+              type="button"
+              aria-pressed={n === q}
+              onClick={() => setCount(q)}
+              className={`h-7 min-w-[32px] rounded-md border px-1.5 font-mono text-[11px] font-medium tabular-nums transition-colors ${
+                n === q
+                  ? "border-[#003399] bg-[#003399]/10 text-[#003399]"
+                  : "border-[#E5E7EB] bg-white text-[#374151] hover:bg-[#F9FAFB]"
+              }`}
+            >
+              {q}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => onArrangeCount(n)}
+          disabled={placements.length === 0}
+          className="flex h-9 w-full items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[12px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5 disabled:opacity-30"
+        >
+          <Rows3 size={13} strokeWidth={1.5} />
+          Susun {n} Foto ({preset.short})
+        </button>
+        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+          Menjajarkan {n} salinan foto terpilih/pertama persis sesuai ukuran
+          preset — grid rapi di tengah lembar, baris terakhir tetap seimbang.
+        </p>
         <div className="grid grid-cols-2 gap-1">
           <button
             type="button"
             onClick={onFillSheet}
             disabled={placements.length === 0}
-            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[11.5px] font-medium text-[#003399] transition-colors hover:bg-[#003399]/5 disabled:opacity-30"
+            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
           >
             <LayoutGrid size={12} strokeWidth={1.5} />
-            Isi Lembar
+            Isi Penuh
           </button>
           <button
             type="button"
@@ -423,9 +519,8 @@ export function PhotoInspector({
             Rapikan
           </button>
         </div>
-        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
-          Isi Lembar mengganti seluruh isi lembar dengan salinan foto terpilih
-          sesuai grid — ideal untuk lembar pas foto.
+        <p className="font-mono text-[10px] tabular-nums text-[#6B7280]">
+          Kapasitas lembar: {capSafe} foto • {preset.short} • margin {settings.marginMm} mm
         </p>
         <div className="flex gap-2">
           <NumField
