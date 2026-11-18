@@ -5,7 +5,7 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { usePrintStation } from "@/hooks/use-print-station";
-import { TopBar } from "./top-bar";
+import { TopBar, type WorkMode } from "./top-bar";
 import { PreviewStage } from "./preview-stage";
 import { InspectorSidebar } from "./inspector-sidebar";
 import { PrintActionBar } from "./print-action-bar";
@@ -24,9 +24,15 @@ export function PrintStation() {
     }
   };
 
+  const handleWorkModeChange = (mode: WorkMode) => {
+    store.setPhotoMode(mode === "photo");
+  };
+
   return (
     <div className="flex h-screen min-h-0 flex-col bg-[#F4F5F7] text-[#111827]">
       <TopBar
+        workMode={store.photoMode ? "photo" : "doc"}
+        onWorkModeChange={handleWorkModeChange}
         paperId={store.settings.paperId}
         onPaperChange={(id) => store.setSetting("paperId", id)}
         printMode={store.settings.printMode}
@@ -53,6 +59,23 @@ export function PrintStation() {
           overflow={store.contentOverflows}
           scaleMode={store.settings.scaleMode}
           paperShortLabel={store.paper.shortLabel}
+          photo={
+            store.photoMode
+              ? {
+                  placements: store.photoPlacements,
+                  selectedId: store.photoSelectedId,
+                  marginMm: store.photoSettings.marginMm,
+                  lockAspect: store.photoSettings.lockAspect,
+                  cutLines: store.photoSettings.cutLines,
+                  presetShort: store.photoPreset.short,
+                  grayscale: store.settings.colorMode === "grayscale",
+                  onSelect: store.selectPhotoPlacement,
+                  onUpdate: store.updatePhotoPlacement,
+                  onRemove: store.removePhotoPlacement,
+                  onDuplicate: store.duplicatePhotoPlacement,
+                }
+              : null
+          }
           onFiles={store.addFiles}
           onSamples={() => void store.loadSamples()}
           onSelect={store.selectFile}
@@ -78,8 +101,40 @@ export function PrintStation() {
           canPrint={store.canPrint}
           printing={store.printing}
           onPrint={() => void store.triggerPrint()}
-          mobileOpen={sidebarOpen}
-          onOpenChange={setSidebarOpen}
+          photoMode={store.photoMode}
+          photo={{
+            placements: store.photoPlacements,
+            selected: store.photoSelected,
+            files: store.files,
+            settings: store.photoSettings,
+            preset: store.photoPreset,
+            paperWmm: store.paperWmm,
+            paperHmm: store.paperHmm,
+            beyondMargin: store.photoBeyondMargin,
+            onSetting: store.setPhotoSetting,
+            onPreset: store.applyPhotoPreset,
+            onUpdateSelected: (patch) => {
+              if (store.photoSelected) {
+                store.updatePhotoPlacement(store.photoSelected.id, patch);
+              }
+            },
+            onAlign: store.alignPhotoPlacement,
+            onFillSheet: store.fillPhotoSheet,
+            onArrange: store.autoArrangePhotos,
+            onDuplicate: () => {
+              if (store.photoSelected) {
+                store.duplicatePhotoPlacement(store.photoSelected.id);
+              }
+            },
+            onRemove: () => {
+              if (store.photoSelected) {
+                store.removePhotoPlacement(store.photoSelected.id);
+              }
+            },
+            onSelect: store.selectPhotoPlacement,
+            onClear: store.clearPhotoPlacements,
+            onAddImages: store.addAllImagesToSheet,
+          }}
         />
       </main>
 

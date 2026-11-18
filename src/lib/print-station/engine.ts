@@ -14,6 +14,7 @@ import type {
   ColorMode,
   DocxRender,
   LoadedFile,
+  PhotoPlacement,
   ScaleMode,
 } from "@/lib/print-station/types";
 
@@ -183,6 +184,117 @@ async function renderImageSheets(req: BrowserPrintRequest): Promise<string[]> {
   return [
     `<div class="sheet"><img src="${canvas.toDataURL("image/png")}" style="width:${fmt(paperWmm)}mm;height:${fmt(paperHmm)}mm" alt=""/></div>`,
   ];
+}
+
+// PHOTO SHEET ENGINE (Mode Foto) ------------------------------------------------
+
+export interface PhotoSheetSpec {
+  paperWmm: number;
+  paperHmm: number;
+  placements: PhotoPlacement[];
+  /** itemId -> object URL of the source image (null when unavailable). */
+  resolveImage: (itemId: string) => string | null;
+  colorMode: ColorMode;
+  cutLines: boolean;
+}
+
+const imgDecodeCache = new Map<string, Promise<HTMLImageElement>>();
+
+function loadImageCached(url: string): Promise<HTMLImageElement> {
+  const cached = imgDecodeCache.get(url);
+  if (cached) return cached;
+  const task = new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("decode"));
+    el.src = url;
+  });
+  imgDecodeCache.set(url, task);
+  return task;
+}
+
+/**
+ * Rasterize the whole photo sheet (placements + cut lines) into one
+ * paper-sized canvas at PRINT_DPI. Guarantees print output matches the
+ * on-screen editor exactly, independent of driver CSS handling.
+ */
+export async function renderPhotoSheetCanvas(
+  spec: PhotoSheetSpec,
+): Promise<HTMLCanvasElement> {
+  const { paperWmm, paperHmm, placements, resolveImage, colorMode, cutLines } = spec;
+  const dpi = PRINT_DPI;
+  const mmToPx = dpi / 25.4;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round((paperWmm / 25.4) * dpi));
+  canvas.height = Math.max(1, Math.round((paperHmm / 25.4) * dpi));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D tidak tersedia.");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingQuality = "high";
+
+  for (const p of placements) {
+    const url = resolveImage(p.itemId);
+    const drawW = p.wMm * mmToPx;
+    const drawH = p.hMm * mmToPx;
+    const cx = (p.xMm + p.wMm / 2) * mmToPx;
+    const cy = (p.yMm + p.hMm / 2) * mmToPx;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate((p.rotation * Math.PI) / 180);
+
+    let img: HTMLImageElement | null = null;
+    if (url) {
+      try {
+        img = await loadImageCached(url);
+      } catch {
+        img = null;
+      }
+    }
+    if (img) {
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      const scale =
+        p.fit === "cover"
+          ? Math.max(drawW / iw, drawH / ih)
+          : Math.min(drawW / iw, drawH / ih);
+      const dw = iw * scale;
+      const dh = ih * scale;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(-drawW / 2, -drawH / 2, drawW, drawH);
+      ctx.clip();
+      ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+      ctx.restore();
+    } else {
+      // Missing source: neutral placeholder so the sheet still prints.
+      ctx.fillStyle = "#E5E7EB";
+      ctx.fillRect(-drawW / 2, -drawH / 2, drawW, drawH);
+    }
+
+    if (cutLines) {
+      ctx.strokeStyle = "#AEB4BC";
+      ctx.lineWidth = Math.max(1, 0.15 * mmToPx);
+      ctx.setLineDash([1.2 * mmToPx, 1.2 * mmToPx]);
+      ctx.strokeRect(-drawW / 2, -drawH / 2, drawW, drawH);
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
+  if (colorMode === "grayscale") applyGrayscale(canvas);
+  return canvas;
+}
+
+/** Browser print path for the photo sheet (iframe + exact @page). */
+export async function printPhotoViaBrowser(
+  spec: PhotoSheetSpec,
+  copies: number,
+): Promise<void> {
+  const canvas = await renderPhotoSheetCanvas(spec);
+  const sheet = `<div class="sheet"><img src="${canvas.toDataURL("image/png")}" style="width:${fmt(spec.paperWmm)}mm;height:${fmt(spec.paperHmm)}mm" alt=""/></div>`;
+  const html = buildPrintHtml(spec.paperWmm, spec.paperHmm, scaleSheets([sheet], copies).join("\n"), "");
+  await printIframe(html);
 }
 
 async function renderDocxHtml(req: BrowserPrintRequest): Promise<{ inner: string; css: string }> {

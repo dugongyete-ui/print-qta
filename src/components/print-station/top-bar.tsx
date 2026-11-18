@@ -1,20 +1,40 @@
 "use client";
 
-// 52px top utility bar: app identity, physical tray selector, printer status.
+// 52px top utility bar: app identity, physical tray selector, printer status,
+// and the document / photo work-mode switch.
 
-import { HardDrive, Monitor, Printer, Settings2 } from "lucide-react";
-import { PAPERS, getPaper, type PaperId } from "@/lib/paper";
+import {
+  FileText,
+  HardDrive,
+  Image as ImageIcon,
+  Monitor,
+  Printer,
+  Settings2,
+} from "lucide-react";
+import {
+  DOC_PAPER_IDS,
+  PHOTO_PAPER_IDS,
+  PAPERS,
+  getPaper,
+  type PaperId,
+} from "@/lib/paper";
 import type { PrintMode, SpoolerState } from "@/lib/print-station/types";
 import { Segmented } from "./segmented";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 
+export type WorkMode = "doc" | "photo";
+
 interface TopBarProps {
+  workMode: WorkMode;
+  onWorkModeChange: (mode: WorkMode) => void;
   paperId: PaperId;
   onPaperChange: (id: PaperId) => void;
   printMode: PrintMode;
@@ -24,6 +44,8 @@ interface TopBarProps {
 }
 
 export function TopBar({
+  workMode,
+  onWorkModeChange,
   paperId,
   onPaperChange,
   printMode,
@@ -33,6 +55,9 @@ export function TopBar({
 }: TopBarProps) {
   const spoolerDot =
     spooler.state === "available" ? "ok" : spooler.state === "checking" ? "wait" : "off";
+
+  const docPapers = PAPERS.filter((p) => DOC_PAPER_IDS.includes(p.id));
+  const photoPapers = PAPERS.filter((p) => PHOTO_PAPER_IDS.includes(p.id));
 
   return (
     <header className="z-30 flex h-[52px] min-h-[52px] shrink-0 items-center gap-3 border-b border-[#E5E7EB] bg-white px-4">
@@ -44,11 +69,32 @@ export function TopBar({
           <span className="sm:hidden">Print Station</span>
         </span>
         <span className="hidden rounded border border-[#E5E7EB] bg-[#F9FAFB] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#6B7280] md:block">
-          v1.0
+          v1.1
         </span>
       </div>
 
       <div className="ml-auto flex shrink-0 items-center gap-2">
+        {/* Work mode: document vs photo layout editor */}
+        <Segmented<WorkMode>
+          value={workMode}
+          onChange={onWorkModeChange}
+          options={[
+            {
+              value: "doc",
+              label: "Dokumen",
+              icon: <FileText size={13} strokeWidth={1.5} aria-hidden="true" />,
+              labelClassName: "hidden md:inline",
+            },
+            {
+              value: "photo",
+              label: "Foto",
+              icon: <ImageIcon size={13} strokeWidth={1.5} aria-hidden="true" />,
+              labelClassName: "hidden md:inline",
+            },
+          ]}
+          title="Mode kerja — dokumen atau lembar foto"
+        />
+
         {/* Physical tray selector (accessible via drawer on <sm) */}
         <div className="hidden shrink-0 items-center gap-2 sm:flex">
           <span className="hidden text-[11px] font-medium text-[#6B7280] xl:block">
@@ -63,11 +109,26 @@ export function TopBar({
               <span className="hidden sm:inline"><SelectValue /></span>
             </SelectTrigger>
             <SelectContent className="rounded-md border-[#E5E7EB]">
-              {PAPERS.map((p) => (
-                <SelectItem key={p.id} value={p.id} className="font-mono text-[11.5px] tabular-nums">
-                  {p.label}
-                </SelectItem>
-              ))}
+              <SelectGroup>
+                <SelectLabel className="font-mono text-[9.5px] uppercase tracking-[0.08em] text-[#9CA3AF]">
+                  Dokumen
+                </SelectLabel>
+                {docPapers.map((p) => (
+                  <SelectItem key={p.id} value={p.id} className="font-mono text-[11.5px] tabular-nums">
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+              <SelectGroup>
+                <SelectLabel className="font-mono text-[9.5px] uppercase tracking-[0.08em] text-[#9CA3AF]">
+                  Kertas Foto
+                </SelectLabel>
+                {photoPapers.map((p) => (
+                  <SelectItem key={p.id} value={p.id} className="font-mono text-[11.5px] tabular-nums">
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
         </div>

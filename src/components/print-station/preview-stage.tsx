@@ -11,6 +11,7 @@ import {
   ChevronLeft,
   ChevronRight,
   FileWarning,
+  Image as ImageIcon,
   Loader2,
   Ruler,
   Trash2,
@@ -20,11 +21,27 @@ import { MM_TO_PX96 } from "@/lib/paper";
 import type {
   DocxRender,
   LoadedFile,
+  PhotoPlacement,
   ZoomMode,
 } from "@/lib/print-station/types";
 import { FileQueue, UploadDropzone } from "./upload-queue";
+import { PhotoCanvas } from "./photo-canvas";
 
 const MARGIN_GUIDE_MM = 5; // typical Epson minimum printable margin
+
+interface PhotoStageData {
+  placements: PhotoPlacement[];
+  selectedId: string | null;
+  marginMm: number;
+  lockAspect: boolean;
+  cutLines: boolean;
+  presetShort: string;
+  grayscale: boolean;
+  onSelect: (id: string | null) => void;
+  onUpdate: (id: string, patch: Partial<PhotoPlacement>) => void;
+  onRemove: (id: string) => void;
+  onDuplicate: (id: string) => void;
+}
 
 interface PreviewStageProps {
   file: LoadedFile | null;
@@ -43,6 +60,7 @@ interface PreviewStageProps {
   overflow: boolean;
   scaleMode: "fit" | "original";
   paperShortLabel: string;
+  photo: PhotoStageData | null;
   onFiles: (files: File[]) => void;
   onSamples: () => void;
   onSelect: (id: string) => void;
@@ -296,6 +314,34 @@ export function PreviewStage(props: PreviewStageProps) {
 
   const navDisabled = !file || file.status !== "ready" || !pageCount || pageCount < 2;
 
+  const photo = props.photo;
+  const photoMode = photo !== null;
+
+  const zoomControl = (
+    <div className="flex items-center rounded-[5px] bg-[#F3F4F6] p-0.5">
+      <button
+        type="button"
+        aria-pressed={zoom === "fit"}
+        onClick={() => onZoomChange("fit")}
+        className={`h-6 rounded-[4px] px-2 text-[11px] font-medium transition-colors ${
+          zoom === "fit" ? "bg-white text-[#111827] shadow-sm" : "text-[#6B7280] hover:text-[#111827]"
+        }`}
+      >
+        Fit
+      </button>
+      <button
+        type="button"
+        aria-pressed={zoom === "100"}
+        onClick={() => onZoomChange("100")}
+        className={`h-6 rounded-[4px] px-2 font-mono text-[11px] font-medium tabular-nums transition-colors ${
+          zoom === "100" ? "bg-white text-[#111827] shadow-sm" : "text-[#6B7280] hover:text-[#111827]"
+        }`}
+      >
+        100%
+      </button>
+    </div>
+  );
+
   const setSafePage = useCallback(
     (p: number) => {
       const total = pageCount ?? 1;
@@ -313,7 +359,17 @@ export function PreviewStage(props: PreviewStageProps) {
       <FileQueue files={props.files ?? []} activeId={props.activeQueueId ?? null} onSelect={onSelect} onRemove={onRemove} />
 
       {/* Source-size meta row (badge lives here, never overlaps the queue) */}
-      {file && file.status === "ready" ? (
+      {photoMode && photo ? (
+        <div className="flex h-9 shrink-0 items-center justify-center px-4">
+          <div
+            className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border border-[#E5E7EB] bg-white px-3 font-mono text-[10.5px] tabular-nums text-[#6B7280]"
+            role="status"
+          >
+            <ImageIcon size={11} strokeWidth={1.5} aria-hidden="true" />
+            Mode Foto • {photo.placements.length} foto • {photo.presetShort} • margin {photo.marginMm} mm
+          </div>
+        </div>
+      ) : file && file.status === "ready" ? (
         <div className="flex h-9 shrink-0 items-center justify-center px-4">
           <AutoFitBadge
             mismatch={mismatch}
@@ -326,7 +382,36 @@ export function PreviewStage(props: PreviewStageProps) {
       ) : null}
 
       <div ref={scrollRef} className="ps-scroll relative min-h-0 flex-1 overflow-auto">
-        {!file ? (
+        {/* ---- PHOTO MODE: Word-like sheet editor ---- */}
+        {photoMode && photo ? (
+          props.files.length === 0 ? (
+            <UploadDropzone onFiles={onFiles} onSamples={onSamples} dragging={dragging} />
+          ) : (
+            <div className="flex min-h-full w-max min-w-full items-center justify-center p-9 pb-32 lg:pb-16">
+              <div
+                className="relative shrink-0 overflow-hidden rounded-[2px] border border-[#E5E7EB] bg-white shadow-[0_1px_2px_rgba(17,24,39,0.06)]"
+                style={{ width: sheetW, height: sheetH }}
+              >
+                <PhotoCanvas
+                  paperWmm={paperWmm}
+                  paperHmm={paperHmm}
+                  k={k}
+                  placements={photo.placements}
+                  files={props.files}
+                  selectedId={photo.selectedId}
+                  marginMm={photo.marginMm}
+                  lockAspect={photo.lockAspect}
+                  cutLines={photo.cutLines}
+                  grayscale={photo.grayscale}
+                  onSelect={photo.onSelect}
+                  onUpdate={photo.onUpdate}
+                  onRemove={photo.onRemove}
+                  onDuplicate={photo.onDuplicate}
+                />
+              </div>
+            </div>
+          )
+        ) : !file ? (
           <UploadDropzone onFiles={onFiles} onSamples={onSamples} dragging={dragging} />
         ) : (
           <div className="flex min-h-full w-max min-w-full items-center justify-center p-9 pb-32 lg:pb-16">
@@ -480,7 +565,14 @@ export function PreviewStage(props: PreviewStageProps) {
       </div>
 
       {/* Floating stage controls */}
-      {file && file.status !== "error" ? (
+      {photoMode ? (
+        <div className="absolute bottom-[84px] left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-1.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)] lg:bottom-4">
+          {zoomControl}
+          <span className="mr-1 whitespace-nowrap px-1 font-mono text-[10px] tabular-nums text-[#9CA3AF]">
+            {props.paperShortLabel} • {Math.round(paperWmm)}×{Math.round(paperHmm)} mm
+          </span>
+        </div>
+      ) : file && file.status !== "error" ? (
         <div className="absolute bottom-[84px] left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white px-1.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)] lg:bottom-4">
           <button
             type="button"
@@ -507,28 +599,7 @@ export function PreviewStage(props: PreviewStageProps) {
 
           <span className="mx-1 h-5 w-px bg-[#E5E7EB]" aria-hidden="true" />
 
-          <div className="flex items-center rounded-[5px] bg-[#F3F4F6] p-0.5">
-            <button
-              type="button"
-              aria-pressed={zoom === "fit"}
-              onClick={() => onZoomChange("fit")}
-              className={`h-6 rounded-[4px] px-2 text-[11px] font-medium transition-colors ${
-                zoom === "fit" ? "bg-white text-[#111827] shadow-sm" : "text-[#6B7280] hover:text-[#111827]"
-              }`}
-            >
-              Fit
-            </button>
-            <button
-              type="button"
-              aria-pressed={zoom === "100"}
-              onClick={() => onZoomChange("100")}
-              className={`h-6 rounded-[4px] px-2 font-mono text-[11px] font-medium tabular-nums transition-colors ${
-                zoom === "100" ? "bg-white text-[#111827] shadow-sm" : "text-[#6B7280] hover:text-[#111827]"
-              }`}
-            >
-              100%
-            </button>
-          </div>
+          {zoomControl}
 
           <span className="mx-1 h-5 w-px bg-[#E5E7EB]" aria-hidden="true" />
 

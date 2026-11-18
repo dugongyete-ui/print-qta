@@ -88,3 +88,54 @@ export interface SpoolerState {
 }
 
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Photo layout mode (Word-like photo print editor)
+// ---------------------------------------------------------------------------
+
+export type PhotoFit = "cover" | "contain";
+
+/** One photo placed on the photo sheet. Coordinates are mm on paper. */
+export interface PhotoPlacement {
+  id: string;
+  /** Reference to the LoadedFile (image) providing the pixels. */
+  itemId: string;
+  /** Unrotated top-left corner in mm, relative to the paper sheet. */
+  xMm: number;
+  yMm: number;
+  wMm: number;
+  hMm: number;
+  /** 0 | 90 | 180 | 270 */
+  rotation: number;
+  fit: PhotoFit;
+}
+
+export interface PhotoSettings {
+  /** Active PhotoPreset id for new / re-sized photos. */
+  presetId: string;
+  /** Sheet margin (mm) — printable safe area for the layout. */
+  marginMm: number;
+  /** Gap between photos when auto-filling / arranging (mm). */
+  gapMm: number;
+  /** Draw dashed cut guides around each photo (pas-foto sheets). */
+  cutLines: boolean;
+  /** Keep width/height ratio when resizing (Word-like aspect lock). */
+  lockAspect: boolean;
+  /** Free-size dims used by the "custom" preset (mm). */
+  customWMm: number;
+  customHMm: number;
+}
+
+export const DEFAULT_PHOTO_SETTINGS: PhotoSettings = {
+  presetId: "p-4r",
+  marginMm: 5,
+  gapMm: 4,
+  cutLines: true,
+  lockAspect: true,
+  customWMm: 102,
+  customHMm: 152,
+};
+
+/** Hard cap so a runaway fill cannot flood the print engine. */
+export const MAX_PLACEMENTS = 200;
+export const MIN_PHOTO_MM = 10;

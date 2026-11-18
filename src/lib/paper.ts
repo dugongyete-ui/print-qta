@@ -1,7 +1,21 @@
 // Paper geometry & document size detection utilities.
 // All linear values are millimeters unless stated otherwise.
 
-export type PaperId = "a4" | "f4" | "letter" | "a5" | "4r";
+export type PaperId =
+  | "a4"
+  | "f4"
+  | "letter"
+  | "a5"
+  | "2r"
+  | "3r"
+  | "4r"
+  | "5r"
+  | "6r"
+  | "8r"
+  | "8rp";
+
+/** Paper groups for grouped selects: document vs photo lab papers. */
+export type PaperGroup = "doc" | "photo";
 
 export interface PaperSize {
   id: PaperId;
@@ -54,6 +68,23 @@ export const PAPERS: PaperSize[] = [
     heightMm: 210,
     ippMedia: "iso_a5_148x210mm",
   },
+  // Photo lab papers (seri R)
+  {
+    id: "2r",
+    label: "2R — 64 × 89 mm",
+    shortLabel: "2R",
+    widthMm: 64,
+    heightMm: 89,
+    ippMedia: "custom_2r_64x89mm",
+  },
+  {
+    id: "3r",
+    label: "3R — 89 × 127 mm",
+    shortLabel: "3R",
+    widthMm: 89,
+    heightMm: 127,
+    ippMedia: "custom_3r_89x127mm",
+  },
   {
     id: "4r",
     label: "4R — 102 × 152 mm",
@@ -62,12 +93,51 @@ export const PAPERS: PaperSize[] = [
     heightMm: 152,
     ippMedia: "na_4x6_4x6in",
   },
+  {
+    id: "5r",
+    label: "5R — 127 × 178 mm",
+    shortLabel: "5R",
+    widthMm: 127,
+    heightMm: 178,
+    ippMedia: "custom_5r_127x178mm",
+  },
+  {
+    id: "6r",
+    label: "6R — 152 × 203 mm",
+    shortLabel: "6R",
+    widthMm: 152,
+    heightMm: 203,
+    ippMedia: "custom_6r_152x203mm",
+  },
+  {
+    id: "8r",
+    label: "8R — 203 × 254 mm",
+    shortLabel: "8R",
+    widthMm: 203,
+    heightMm: 254,
+    ippMedia: "custom_8r_203x254mm",
+  },
+  {
+    id: "8rp",
+    label: "8R+ — 203 × 305 mm",
+    shortLabel: "8R+",
+    widthMm: 203,
+    heightMm: 305,
+    ippMedia: "custom_8rp_203x305mm",
+  },
 ];
+
+export const DOC_PAPER_IDS: PaperId[] = ["a4", "f4", "letter", "a5"];
+export const PHOTO_PAPER_IDS: PaperId[] = ["2r", "3r", "4r", "5r", "6r", "8r", "8rp"];
 
 export const DEFAULT_PAPER: PaperId = "a4";
 
 export function getPaper(id: PaperId): PaperSize {
   return PAPERS.find((p) => p.id === id) ?? PAPERS[0];
+}
+
+export function paperGroup(id: PaperId): PaperGroup {
+  return PHOTO_PAPER_IDS.includes(id) ? "photo" : "doc";
 }
 
 export function paperDims(
