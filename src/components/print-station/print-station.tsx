@@ -84,6 +84,7 @@ export function PrintStation() {
                   cutLines: store.photoSettings.cutLines,
                   presetShort: store.photoPreset.short,
                   grayscale: store.settings.colorMode === "grayscale",
+                  adjust: store.photoSettings.adjust,
                   onSelect: store.selectPhotoPlacement,
                   onUpdate: store.updatePhotoPlacement,
                   onRemove: store.removePhotoPlacement,
@@ -128,6 +129,7 @@ export function PrintStation() {
             beyondMargin: store.photoBeyondMargin,
             capacity: store.photoCapacity,
             onSetting: store.setPhotoSetting,
+            onBorderless: store.setPhotoBorderless,
             onPreset: store.applyPhotoPreset,
             onUpdateSelected: (patch) => {
               if (store.photoSelected) {

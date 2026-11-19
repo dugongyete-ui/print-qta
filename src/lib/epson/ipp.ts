@@ -102,6 +102,8 @@ export interface IppPrintJobOptions {
   quality: 3 | 4 | 5; // IPP print-quality enum
   sides: "one-sided" | "two-sided-long-edge";
   media: string; // IPP media keyword, e.g. iso_a4_210x297mm
+  /** PWG media-type keyword, e.g. "photographic-glossy" (omitted for plain). */
+  mediaType?: string;
   orientation: 3 | 4; // 3 = portrait, 4 = landscape
   pageRanges: Array<[number, number]>;
   fitToPage: boolean;
@@ -135,6 +137,9 @@ export function buildPrintJobPacket(options: IppPrintJobOptions): Uint8Array {
     attrInt(Tag.ENUM, "orientation-requested", options.orientation),
     attr(Tag.KEYWORD, "print-scaling", fitTag),
   ];
+  if (options.mediaType) {
+    jobParts.push(attr(Tag.KEYWORD, "media-type", options.mediaType));
+  }
 
   // page-ranges: 1setOf rangeOfInteger (merge only non-contiguous)
   const ranges = mergeRanges(options.pageRanges);

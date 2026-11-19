@@ -14,6 +14,7 @@ import type {
   ColorMode,
   DocxRender,
   LoadedFile,
+  PhotoAdjustments,
   PhotoPlacement,
   ScaleMode,
 } from "@/lib/print-station/types";
@@ -188,6 +189,22 @@ async function renderImageSheets(req: BrowserPrintRequest): Promise<string[]> {
 
 // PHOTO SHEET ENGINE (Mode Foto) ------------------------------------------------
 
+/**
+ * CSS filter string for the sheet-wide photo adjustments. The preview <img>
+ * uses the identical string, so screen and paper always agree.
+ */
+export function photoAdjustFilterCss(a?: PhotoAdjustments): string {
+  if (!a) return "none";
+  const parts: string[] = [];
+  if (Math.abs(a.brightness - 1) > 0.002)
+    parts.push(`brightness(${a.brightness.toFixed(3)})`);
+  if (Math.abs(a.contrast - 1) > 0.002)
+    parts.push(`contrast(${a.contrast.toFixed(3)})`);
+  if (Math.abs(a.saturate - 1) > 0.002)
+    parts.push(`saturate(${a.saturate.toFixed(3)})`);
+  return parts.length > 0 ? parts.join(" ") : "none";
+}
+
 export interface PhotoSheetSpec {
   paperWmm: number;
   paperHmm: number;
@@ -196,6 +213,8 @@ export interface PhotoSheetSpec {
   resolveImage: (itemId: string) => string | null;
   colorMode: ColorMode;
   cutLines: boolean;
+  /** Sheet-wide brightness / contrast / saturation (CSS-filter identical). */
+  adjust?: PhotoAdjustments;
 }
 
 const imgDecodeCache = new Map<string, Promise<HTMLImageElement>>();
@@ -221,7 +240,7 @@ function loadImageCached(url: string): Promise<HTMLImageElement> {
 export async function renderPhotoSheetCanvas(
   spec: PhotoSheetSpec,
 ): Promise<HTMLCanvasElement> {
-  const { paperWmm, paperHmm, placements, resolveImage, colorMode, cutLines } = spec;
+  const { paperWmm, paperHmm, placements, resolveImage, colorMode, cutLines, adjust } = spec;
   const dpi = PRINT_DPI;
   const mmToPx = dpi / 25.4;
   const canvas = document.createElement("canvas");
@@ -260,11 +279,21 @@ export async function renderPhotoSheetCanvas(
           : Math.min(drawW / iw, drawH / ih);
       const dw = iw * scale;
       const dh = ih * scale;
+      // Crop shift mirrors CSS object-position: the point at frac% of the
+      // oversized image aligns with frac% of the frame (0 = left/top,
+      // 0.5 = centered, 1 = right/bottom).
+      const fx = Math.min(Math.max((p.cropX ?? 0) / 100 + 0.5, 0), 1);
+      const fy = Math.min(Math.max((p.cropY ?? 0) / 100 + 0.5, 0), 1);
+      const offX = (drawW - dw) * fx;
+      const offY = (drawH - dh) * fy;
       ctx.save();
       ctx.beginPath();
       ctx.rect(-drawW / 2, -drawH / 2, drawW, drawH);
       ctx.clip();
-      ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+      const cssFilter = photoAdjustFilterCss(adjust);
+      if (cssFilter !== "none") ctx.filter = cssFilter;
+      ctx.drawImage(img, -dw / 2 + offX, -dh / 2 + offY, dw, dh);
+      ctx.filter = "none";
       ctx.restore();
     } else {
       // Missing source: neutral placeholder so the sheet still prints.

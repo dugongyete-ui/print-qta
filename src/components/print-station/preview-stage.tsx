@@ -21,6 +21,7 @@ import { MM_TO_PX96 } from "@/lib/paper";
 import type {
   DocxRender,
   LoadedFile,
+  PhotoAdjustments,
   PhotoPlacement,
   ZoomMode,
 } from "@/lib/print-station/types";
@@ -37,6 +38,7 @@ interface PhotoStageData {
   cutLines: boolean;
   presetShort: string;
   grayscale: boolean;
+  adjust: PhotoAdjustments;
   onSelect: (id: string | null) => void;
   onUpdate: (id: string, patch: Partial<PhotoPlacement>) => void;
   onRemove: (id: string) => void;
@@ -403,6 +405,7 @@ export function PreviewStage(props: PreviewStageProps) {
                   lockAspect={photo.lockAspect}
                   cutLines={photo.cutLines}
                   grayscale={photo.grayscale}
+                  adjust={photo.adjust}
                   onSelect={photo.onSelect}
                   onUpdate={photo.onUpdate}
                   onRemove={photo.onRemove}

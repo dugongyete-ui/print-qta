@@ -56,6 +56,8 @@ export interface PrintSettings {
   copies: number;
   duplex: boolean;
   printMode: PrintMode;
+  /** Epson media type the tray is loaded with (drives driver hints + IPP). */
+  paperType: PaperType;
 }
 
 export const DEFAULT_SETTINGS: PrintSettings = {
@@ -69,7 +71,58 @@ export const DEFAULT_SETTINGS: PrintSettings = {
   copies: 1,
   duplex: false,
   printMode: "browser",
+  paperType: "plain",
 };
+
+// ---------------------------------------------------------------------------
+// Media type (jenis kertas) — mirrors Epson driver media settings
+// ---------------------------------------------------------------------------
+
+export type PaperType = "plain" | "glossy" | "matte" | "premium";
+
+export interface PaperTypeOption {
+  id: PaperType;
+  label: string;
+  short: string;
+  hint: string;
+  /** PWG media-type keyword sent over IPP / lp. */
+  ippMediaType: string;
+}
+
+export const PAPER_TYPES: PaperTypeOption[] = [
+  {
+    id: "plain",
+    label: "Kertas Biasa (HVS)",
+    short: "",
+    hint: "HVS / bond — dokumen & cetak harian",
+    ippMediaType: "stationery",
+  },
+  {
+    id: "glossy",
+    label: "Foto Glossy",
+    short: "Glossy",
+    hint: "Kilap tinggi — warna vivid, cocok foto warna",
+    ippMediaType: "photographic-glossy",
+  },
+  {
+    id: "matte",
+    label: "Foto Matte",
+    short: "Matte",
+    hint: "Doff anti-silau — ideal pas foto & scan-like",
+    ippMediaType: "photographic-matte",
+  },
+  {
+    id: "premium",
+    label: "Foto Premium",
+    short: "Premium",
+    hint: "Kertas foto premium — presentasi & cetak lab",
+    ippMediaType: "photographic-high-gloss",
+  },
+];
+
+export function getPaperType(id: PaperType): PaperTypeOption {
+  return PAPER_TYPES.find((t) => t.id === id) ?? PAPER_TYPES[0];
+}
 
 export const QUALITY_HINT: Record<PrintQuality, string> = {
   draft: "Ekonomi tinta • cepat",
@@ -108,7 +161,34 @@ export interface PhotoPlacement {
   /** 0 | 90 | 180 | 270 */
   rotation: number;
   fit: PhotoFit;
+  /** Which part of the photo shows when fit = cover: -50 .. 50 (% shift). */
+  cropX: number;
+  cropY: number;
 }
+
+/**
+ * Sheet-wide image adjustments (Epson Easy Photo Print style). Values are
+ * CSS filter multipliers — 1 = neutral — so the preview <img> and the print
+ * canvas rasterize with the exact same filter string.
+ */
+export interface PhotoAdjustments {
+  brightness: number;
+  contrast: number;
+  saturate: number;
+}
+
+export const NEUTRAL_ADJUST: PhotoAdjustments = {
+  brightness: 1,
+  contrast: 1,
+  saturate: 1,
+};
+
+/** One-tap auto-enhance preset (mild S-curve + vibrance). */
+export const AUTO_ENHANCE_ADJUST: PhotoAdjustments = {
+  brightness: 1.04,
+  contrast: 1.12,
+  saturate: 1.18,
+};
 
 export interface PhotoSettings {
   /** Active PhotoPreset id for new / re-sized photos. */
@@ -117,6 +197,10 @@ export interface PhotoSettings {
   marginMm: number;
   /** Gap between photos when auto-filling / arranging (mm). */
   gapMm: number;
+  /** Borderless intent: margin zeroed + driver borderless hint shown. */
+  borderless: boolean;
+  /** Sheet-wide image adjustments applied to preview and print alike. */
+  adjust: PhotoAdjustments;
   /**
    * How many photos to tile per sheet ("Jumlah Foto"). The sheet auto-regrids
    * to this count whenever it changes, a preset changes, or a photo is
@@ -136,6 +220,8 @@ export const DEFAULT_PHOTO_SETTINGS: PhotoSettings = {
   presetId: "pf-3x4",
   marginMm: 5,
   gapMm: 4,
+  borderless: false,
+  adjust: { ...NEUTRAL_ADJUST },
   perSheet: 6,
   cutLines: true,
   lockAspect: true,

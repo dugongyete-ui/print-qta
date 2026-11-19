@@ -21,6 +21,7 @@ import {
   MAX_FILE_BYTES,
   MAX_PLACEMENTS,
   MIN_PHOTO_MM,
+  getPaperType,
   type DocxRender,
   type LoadedFile,
   type PhotoPlacement,
@@ -654,6 +655,13 @@ export function usePrintStation() {
       perSheet: patch.perSheet !== undefined
         ? Math.min(Math.max(Math.round(patch.perSheet), 1), 200)
         : s.perSheet,
+      adjust: patch.adjust !== undefined
+        ? {
+            brightness: Math.min(Math.max(patch.adjust.brightness, 0.5), 1.6),
+            contrast: Math.min(Math.max(patch.adjust.contrast, 0.5), 1.6),
+            saturate: Math.min(Math.max(patch.adjust.saturate, 0), 2),
+          }
+        : s.adjust,
     }));
   }, []);
 
@@ -679,6 +687,8 @@ export function usePrintStation() {
         hMm: h,
         rotation: 0,
         fit: "cover",
+        cropX: 0,
+        cropY: 0,
       };
       return [...list, clampPlacement(placement, paperW, paperH)];
     });
@@ -765,6 +775,10 @@ export function usePrintStation() {
         dims?: { wMm: number; hMm: number };
         auto?: boolean;
         ignoreSelection?: boolean;
+        /** Explicit margin override — used when margin changes and re-tile
+         * happens in the same tick (borderless toggle), where the settings
+         * ref is still stale. */
+        marginMm?: number;
       },
     ) => {
       const list = photoPlacementsRef.current;
@@ -776,7 +790,7 @@ export function usePrintStation() {
       const presetH = preset.group === "custom" ? ps.customHMm : preset.hMm;
       const pw = Math.min(options?.dims ? options.dims.wMm : presetW, paperW);
       const ph = Math.min(options?.dims ? options.dims.hMm : presetH, paperH);
-      const margin = ps.marginMm;
+      const margin = options?.marginMm ?? ps.marginMm;
       const gap = ps.gapMm;
       const printW = paperW - 2 * margin;
       const printH = paperH - 2 * margin;
@@ -879,6 +893,8 @@ export function usePrintStation() {
             hMm: h,
             rotation: 0,
             fit: src ? src.fit : "cover",
+            cropX: src?.cropX ?? 0,
+            cropY: src?.cropY ?? 0,
           });
         }
       }
@@ -929,6 +945,29 @@ export function usePrintStation() {
       });
     }, 350);
   }, [arrangePhotoCopies]);
+
+  /**
+   * Borderless toggle — zeroes / restores the sheet margin and re-tiles the
+   * grid in the same tick with the explicit new margin (the settings ref is
+   * still stale at this point, so it is passed explicitly).
+   */
+  const setPhotoBorderless = useCallback(
+    (next: boolean) => {
+      setPhotoSettings((s) => ({
+        ...s,
+        borderless: next,
+        marginMm: next ? 0 : DEFAULT_PHOTO_SETTINGS.marginMm,
+      }));
+      const list = photoPlacementsRef.current;
+      if (list.length === 0) return;
+      arrangePhotoCopies(photoSettingsRef.current.perSheet, {
+        auto: true,
+        ignoreSelection: true,
+        marginMm: next ? 0 : DEFAULT_PHOTO_SETTINGS.marginMm,
+      });
+    },
+    [arrangePhotoCopies],
+  );
 
   // Intake path used by addFiles / mode switch / "tambah foto": drop the
   // image on the sheet, then re-tile once the batch settles.
@@ -1034,6 +1073,8 @@ export function usePrintStation() {
           hMm: p.hMm,
           rotation: p.rotation,
           fit: p.fit,
+          cropX: p.cropX ?? 0,
+          cropY: p.cropY ?? 0,
         });
       }
     }
@@ -1112,6 +1153,7 @@ export function usePrintStation() {
         null,
       colorMode: s.colorMode,
       cutLines: ps.cutLines,
+      adjust: ps.adjust,
     };
     if (s.printMode === "spooler") {
       const canvas = await renderPhotoSheetCanvas(spec);
@@ -1126,6 +1168,7 @@ export function usePrintStation() {
             kind: "image",
             paperId: s.paperId,
             ippMedia: getPaper(s.paperId).ippMedia,
+            paperType: s.paperType,
             paperWmm: dims.wMm,
             paperHmm: dims.hMm,
             orientation: "portrait",
@@ -1214,6 +1257,7 @@ export function usePrintStation() {
           kind: f.kind,
           paperId: s.paperId,
           ippMedia: getPaper(s.paperId).ippMedia,
+          paperType: s.paperType,
           paperWmm: dims.wMm,
           paperHmm: dims.hMm,
           orientation: s.orientation,
@@ -1352,13 +1396,15 @@ export function usePrintStation() {
 
   const summary = useMemo(() => {
     const paperShort = paper.shortLabel;
+    const typeShort = getPaperType(settings.paperType).short;
+    const mediaLabel = typeShort ? ` • ${typeShort}` : "";
     const color = settings.colorMode === "color" ? "Berwarna" : "Hitam Putih";
     const copies = settings.copies;
     if (photoMode) {
-      return `${photoPlacements.length} Foto • ${photoPreset.short} • ${paperShort} • ${color} • ${copies} Salinan`;
+      return `${photoPlacements.length} Foto • ${photoPreset.short} • ${paperShort}${mediaLabel} • ${color} • ${copies} Salinan`;
     }
     const pagesCount = selectedPages.length;
-    const base = `${paperShort} • ${color} • ${pagesCount} Hal × ${copies} Salinan`;
+    const base = `${paperShort}${mediaLabel} • ${color} • ${pagesCount} Hal × ${copies} Salinan`;
     return settings.duplex ? `${base} • Bolak-Balik` : base;
   }, [
     photoMode,
@@ -1368,6 +1414,7 @@ export function usePrintStation() {
     settings.colorMode,
     settings.copies,
     settings.duplex,
+    settings.paperType,
     selectedPages.length,
   ]);
 
@@ -1418,6 +1465,7 @@ export function usePrintStation() {
     // photo actions
     setPhotoMode,
     setPhotoSetting,
+    setPhotoBorderless,
     applyPhotoPreset,
     selectPhotoPlacement,
     updatePhotoPlacement,

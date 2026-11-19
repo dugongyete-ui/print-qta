@@ -69,7 +69,7 @@ export function TopBar({
           <span className="sm:hidden">Print Station</span>
         </span>
         <span className="hidden rounded border border-[#E5E7EB] bg-[#F9FAFB] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#6B7280] md:block">
-          v1.1
+          v1.2
         </span>
       </div>
 

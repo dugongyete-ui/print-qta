@@ -17,12 +17,22 @@ import {
   LayoutGrid,
   Minus,
   Plus,
+  RotateCcw,
   Rows3,
+  Sparkles,
   Trash2,
   Wand2,
 } from "lucide-react";
 import { formatBytes } from "@/lib/paper";
 import type { PhotoAlign } from "@/hooks/use-print-station";
+import {
+  AUTO_ENHANCE_ADJUST,
+  NEUTRAL_ADJUST,
+  type PhotoAdjustments,
+  type PhotoPlacement,
+  type PhotoSettings,
+  type LoadedFile,
+} from "@/lib/print-station/types";
 import {
   PHOTO_GROUP_LABEL,
   PHOTO_PRESETS,
@@ -31,11 +41,6 @@ import {
   type PhotoPreset,
   type PhotoPresetGroup,
 } from "@/lib/print-station/photo-sizes";
-import type {
-  LoadedFile,
-  PhotoPlacement,
-  PhotoSettings,
-} from "@/lib/print-station/types";
 import { Segmented } from "./segmented";
 import {
   Select,
@@ -156,6 +161,46 @@ function IconBtn({
   );
 }
 
+/** Minimal industrial slider row (range input, #003399 accent). */
+function SliderRow({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  format,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (v: number) => void;
+  format: (v: number) => string;
+}) {
+  return (
+    <label className="flex flex-col gap-0.5">
+      <span className="flex items-center justify-between">
+        <span className="text-[12.5px] text-[#111827]">{label}</span>
+        <span className="font-mono text-[10.5px] tabular-nums text-[#6B7280]">
+          {format(value)}
+        </span>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        aria-label={label}
+        className="h-5 w-full cursor-pointer accent-[#003399]"
+      />
+    </label>
+  );
+}
+
 interface PhotoInspectorProps {
   placements: PhotoPlacement[];
   selected: PhotoPlacement | null;
@@ -168,6 +213,8 @@ interface PhotoInspectorProps {
   /** Max copies of the current preset that fit on one sheet. */
   capacity: number;
   onSetting: (patch: Partial<PhotoSettings>) => void;
+  /** Borderless toggle — zeroes margin + re-tiles in one tick. */
+  onBorderless: (v: boolean) => void;
   onPreset: (id: string, customDims?: { wMm: number; hMm: number }) => void;
   onUpdateSelected: (patch: Partial<PhotoPlacement>) => void;
   onAlign: (dir: PhotoAlign) => void;
@@ -197,6 +244,7 @@ export function PhotoInspector({
   beyondMargin,
   capacity,
   onSetting,
+  onBorderless,
   onPreset,
   onUpdateSelected,
   onAlign,
@@ -223,6 +271,10 @@ export function PhotoInspector({
   const unplacedImages = files.filter(
     (f) => f.kind === "image" && f.status === "ready" && !!f.url && !placedIds.has(f.id),
   );
+
+  const setAdjust = (patch: Partial<PhotoAdjustments>) =>
+    onSetting({ adjust: { ...settings.adjust, ...patch } });
+  const pctFmt = (v: number) => `${Math.round(v * 100)}%`;
 
   const scopeLabel = selected ? "menerapkan ke foto terpilih" : "menerapkan ke semua foto";
 
@@ -393,6 +445,39 @@ export function PhotoInspector({
                 title="Cara foto mengisi bingkai"
               />
             </Row>
+            {selected.fit === "cover" ? (
+              <div className="flex flex-col gap-2 rounded-md border border-[#E5E7EB] bg-[#F9FAFB] px-3 py-2.5">
+                <span className="font-mono text-[9.5px] uppercase tracking-[0.06em] text-[#6B7280]">
+                  Geser Potongan (potong penuhi)
+                </span>
+                <SliderRow
+                  label="Geser Horizontal"
+                  value={selected.cropX ?? 0}
+                  min={-50}
+                  max={50}
+                  step={1}
+                  onChange={(v) => onUpdateSelected({ cropX: v })}
+                  format={(v) => `${v}%`}
+                />
+                <SliderRow
+                  label="Geser Vertikal"
+                  value={selected.cropY ?? 0}
+                  min={-50}
+                  max={50}
+                  step={1}
+                  onChange={(v) => onUpdateSelected({ cropY: v })}
+                  format={(v) => `${v}%`}
+                />
+                <button
+                  type="button"
+                  onClick={() => onUpdateSelected({ cropX: 0, cropY: 0 })}
+                  className="inline-flex h-7 w-fit items-center gap-1 rounded border border-[#E5E7EB] bg-white px-2 font-mono text-[10px] text-[#374151] transition-colors hover:bg-white hover:text-[#111827]"
+                >
+                  <RotateCcw size={10} strokeWidth={1.5} />
+                  tengah
+                </button>
+              </div>
+            ) : null}
             <div className="grid grid-cols-6 gap-1">
               <IconBtn title="Rata kiri" onClick={() => onAlign("left")} disabled={!selected}>
                 <AlignStartVertical size={13} strokeWidth={1.5} />
@@ -441,6 +526,64 @@ export function PhotoInspector({
             rotasi, dan cara pemotongannya.
           </p>
         )}
+      </Section>
+
+      {/* Penyesuaian Gambar (Epson Easy Photo Print style) */}
+      <Section title="Penyesuaian Gambar">
+        <SliderRow
+          label="Kecerahan"
+          value={settings.adjust.brightness}
+          min={0.5}
+          max={1.6}
+          step={0.01}
+          onChange={(v) => setAdjust({ brightness: v })}
+          format={pctFmt}
+        />
+        <SliderRow
+          label="Kontras"
+          value={settings.adjust.contrast}
+          min={0.5}
+          max={1.6}
+          step={0.01}
+          onChange={(v) => setAdjust({ contrast: v })}
+          format={pctFmt}
+        />
+        <SliderRow
+          label="Saturasi Warna"
+          value={settings.adjust.saturate}
+          min={0}
+          max={2}
+          step={0.01}
+          onChange={(v) => setAdjust({ saturate: v })}
+          format={pctFmt}
+        />
+        <div className="grid grid-cols-2 gap-1">
+          <button
+            type="button"
+            onClick={() => onSetting({ adjust: { ...AUTO_ENHANCE_ADJUST } })}
+            title="Perbaikan otomatis sekali klik (Epson Auto-Correct)"
+            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[11.5px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+          >
+            <Sparkles size={12} strokeWidth={1.5} />
+            Perbaiki Otomatis
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetting({ adjust: { ...NEUTRAL_ADJUST } })}
+            disabled={
+              settings.adjust.brightness === 1 &&
+              settings.adjust.contrast === 1 &&
+              settings.adjust.saturate === 1
+            }
+            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+          >
+            <RotateCcw size={12} strokeWidth={1.5} />
+            Netral
+          </button>
+        </div>
+        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+          Berlaku untuk semua foto — hasil cetak mengikuti pratinjau persis.
+        </p>
       </Section>
 
       {/* Susun & Lembar */}
@@ -545,6 +688,20 @@ export function PhotoInspector({
             onCommit={(v) => onSetting({ gapMm: v })}
           />
         </div>
+        <Row label="Tanpa Pinggiran">
+          <Switch
+            checked={settings.borderless}
+            onCheckedChange={onBorderless}
+            aria-label="Cetak tanpa pinggiran"
+            className="data-[state=checked]:bg-[#003399]"
+          />
+        </Row>
+        {settings.borderless ? (
+          <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
+            Margin diset 0 mm — foto menjalar ke tepi kertas. Aktifkan juga
+            Borderless pada dialog driver Epson agar hasil tanpa garis putih.
+          </p>
+        ) : null}
         <Row label="Garis Potong">
           <Switch
             checked={settings.cutLines}

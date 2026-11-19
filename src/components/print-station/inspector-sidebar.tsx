@@ -6,10 +6,14 @@
 // (size presets, position & size, sheet tools) sharing color/quality/copies.
 
 import { Minus, Plus } from "lucide-react";
+import { toast } from "sonner";
 import { DOC_PAPER_IDS, PHOTO_PAPER_IDS, PAPERS, type PaperId } from "@/lib/paper";
 import {
+  PAPER_TYPES,
   QUALITY_HINT,
+  getPaperType,
   type LoadedFile,
+  type PaperType,
   type PrintSettings,
 } from "@/lib/print-station/types";
 import type { PhotoPreset } from "@/lib/print-station/photo-sizes";
@@ -74,6 +78,8 @@ export interface PhotoPanelData {
   /** Max copies of the current preset that fit on one sheet. */
   capacity: number;
   onSetting: (patch: Partial<PhotoSettings>) => void;
+  /** Borderless toggle — zeroes margin + re-tiles in one tick. */
+  onBorderless: (v: boolean) => void;
   onPreset: (id: string, customDims?: { wMm: number; hMm: number }) => void;
   onUpdateSelected: (patch: Partial<PhotoPlacement>) => void;
   onAlign: (dir: PhotoAlign) => void;
@@ -95,6 +101,8 @@ function ColorQualitySection({
   settings: PrintSettings;
   onSetting: <K extends keyof PrintSettings>(key: K, value: PrintSettings[K]) => void;
 }) {
+  const paperType = getPaperType(settings.paperType);
+  const isPhotoPaper = settings.paperType !== "plain";
   return (
     <Section title="Warna & Kualitas Epson">
       <Row label="Mode Warna">
@@ -107,6 +115,41 @@ function ColorQualitySection({
           ]}
         />
       </Row>
+      <div className="flex flex-col gap-1.5">
+        <Row label="Jenis Kertas">
+          <Select
+            value={settings.paperType}
+            onValueChange={(v) => {
+              const t = v as PaperType;
+              onSetting("paperType", t);
+              // Epson-like recommendation: photo paper deserves high quality.
+              if (t !== "plain" && settings.quality !== "high") {
+                onSetting("quality", "high");
+                toast.info("Kualitas dinaikkan ke Tinggi", {
+                  description: `${getPaperType(t).label} menghasilkan warna terbaik pada kualitas Tinggi.`,
+                });
+              }
+            }}
+          >
+            <SelectTrigger
+              aria-label="Jenis kertas di tray"
+              className="h-8 w-[170px] rounded-md border-[#E5E7EB] text-[11.5px] text-[#111827] shadow-none focus:ring-1 focus:ring-[#003399]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="rounded-md border-[#E5E7EB]">
+              {PAPER_TYPES.map((t) => (
+                <SelectItem key={t.id} value={t.id} className="text-[11.5px]">
+                  {t.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Row>
+        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+          {paperType.hint}
+        </p>
+      </div>
       <Row label="Kualitas Cetak">
         <Segmented
           value={settings.quality}
@@ -121,6 +164,12 @@ function ColorQualitySection({
       <p className="font-mono text-[10px] text-[#6B7280]">
         {QUALITY_HINT[settings.quality]}
       </p>
+      {isPhotoPaper ? (
+        <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
+          Gunakan Kualitas Tinggi + beri waktu kering 10–15 menit sebelum
+          menumpuk hasil cetak foto.
+        </p>
+      ) : null}
     </Section>
   );
 }
@@ -273,6 +322,7 @@ function SidebarContent({
               beyondMargin={photo.beyondMargin}
               capacity={photo.capacity}
               onSetting={photo.onSetting}
+              onBorderless={photo.onBorderless}
               onPreset={photo.onPreset}
               onUpdateSelected={photo.onUpdateSelected}
               onAlign={photo.onAlign}

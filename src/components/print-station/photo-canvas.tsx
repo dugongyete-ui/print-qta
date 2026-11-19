@@ -8,7 +8,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ImagePlus } from "lucide-react";
-import { MIN_PHOTO_MM, type LoadedFile, type PhotoPlacement } from "@/lib/print-station/types";
+import { MIN_PHOTO_MM, type LoadedFile, type PhotoAdjustments, type PhotoPlacement } from "@/lib/print-station/types";
+import { photoAdjustFilterCss } from "@/lib/print-station/engine";
 
 type HandleDir = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
@@ -37,6 +38,8 @@ interface PhotoCanvasProps {
   lockAspect: boolean;
   cutLines: boolean;
   grayscale: boolean;
+  /** Sheet-wide adjustments — must match the print raster exactly. */
+  adjust?: PhotoAdjustments;
   onSelect: (id: string | null) => void;
   onUpdate: (id: string, patch: Partial<PhotoPlacement>) => void;
   onRemove: (id: string) => void;
@@ -118,6 +121,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     lockAspect,
     cutLines,
     grayscale,
+    adjust,
     onSelect,
     onUpdate,
     onRemove,
@@ -294,6 +298,14 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
   const urlFor = (itemId: string) =>
     files.find((f) => f.id === itemId && f.kind === "image")?.url ?? null;
 
+  // Same filter string the print rasterizer feeds to ctx.filter — the preview
+  // and the paper are pixel-identical by construction.
+  const adjustCss = photoAdjustFilterCss(adjust);
+  const imgFilter =
+    adjustCss !== "none" || grayscale
+      ? `${adjustCss === "none" ? "" : adjustCss}${grayscale ? " grayscale(1)" : ""}`.trim()
+      : undefined;
+
   return (
     <div
       data-testid="photo-sheet"
@@ -362,8 +374,11 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
                 src={url}
                 alt=""
                 draggable={false}
-                className={`h-full w-full ${grayscale ? "grayscale" : ""}`}
-                style={{ objectFit: p.fit === "cover" ? "cover" : "contain" }}
+                style={{
+                  objectFit: p.fit === "cover" ? "cover" : "contain",
+                  objectPosition: `${50 + (p.cropX ?? 0)}% ${50 + (p.cropY ?? 0)}%`,
+                  filter: imgFilter,
+                }}
               />
             ) : (
               <div className="h-full w-full bg-[#F3F4F6]" />

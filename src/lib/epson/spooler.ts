@@ -17,7 +17,7 @@ import {
   buildPrintJobPacket,
   sendIppPrintJob,
 } from "./ipp";
-import type { SpoolerInfo } from "@/lib/print-station/types";
+import { getPaperType, type PaperType, type SpoolerInfo } from "@/lib/print-station/types";
 
 const execFileP = promisify(execFile);
 
@@ -63,6 +63,8 @@ export interface PrintJobPayload {
   kind: "pdf" | "image" | "docx" | "doc";
   paperId: string;
   ippMedia: string;
+  /** Epson media type loaded in the tray (omitted = plain stationery). */
+  paperType?: PaperType;
   paperWmm: number;
   paperHmm: number;
   orientation: "portrait" | "landscape";
@@ -110,6 +112,11 @@ function lpOptions(job: PrintJobPayload): string[] {
     "-o",
     `orientation-requested=${job.orientation === "portrait" ? 3 : 4}`,
   ];
+  // Media type hint for photo stock — drivers that don't know the option
+  // simply ignore it, CUPS still spools the job.
+  if (job.paperType && job.paperType !== "plain") {
+    opts.push("-o", `media-type=${getPaperType(job.paperType).ippMediaType}`);
+  }
   if (job.duplex) opts.push("-o", "sides=two-sided-long-edge");
   return opts;
 }
@@ -151,6 +158,10 @@ export async function spoolPrint(
       quality: QUALITY_ENUM[job.quality],
       sides: job.duplex ? "two-sided-long-edge" : "one-sided",
       media: job.ippMedia,
+      mediaType:
+        job.paperType && job.paperType !== "plain"
+          ? getPaperType(job.paperType).ippMediaType
+          : undefined,
       orientation: job.orientation === "portrait" ? 3 : 4,
       pageRanges: job.pages.map((p) => [p, p]),
       fitToPage: job.scaleMode === "fit",
