@@ -28,6 +28,8 @@ import type { PhotoAlign } from "@/hooks/use-print-station";
 import {
   AUTO_ENHANCE_ADJUST,
   NEUTRAL_ADJUST,
+  type GridAlignH,
+  type GridAlignV,
   type PhotoAdjustments,
   type PhotoPlacement,
   type PhotoSettings,
@@ -219,8 +221,17 @@ interface PhotoInspectorProps {
   onUpdateSelected: (patch: Partial<PhotoPlacement>) => void;
   onAlign: (dir: PhotoAlign) => void;
   onFillSheet: () => void;
-  /** Arrange exactly N preset-sized copies in a grid. */
-  onArrangeCount: (n: number) => void;
+  /** Arrange exactly N preset-sized copies in a grid; opts override stale
+   * settings in the same tick (margin / gap / alignment changes). */
+  onArrangeCount: (
+    n: number,
+    opts?: {
+      marginMm?: number;
+      gapMm?: number;
+      alignV?: GridAlignV;
+      alignH?: GridAlignH;
+    },
+  ) => void;
   onArrange: () => void;
   onDuplicate: () => void;
   onRemove: () => void;
@@ -231,7 +242,7 @@ interface PhotoInspectorProps {
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
 
-const COUNT_QUICK: number[] = [2, 4, 6, 8, 9, 12];
+const COUNT_QUICK: number[] = [2, 3, 4, 6, 8, 9, 12];
 
 export function PhotoInspector({
   placements,
@@ -261,11 +272,27 @@ export function PhotoInspector({
   // uploads and preset changes all drive the same auto-grid count.
   const capSafe = Math.max(1, Math.min(capacity, 200));
   const n = Math.max(1, Math.min(settings.perSheet, capSafe));
+  /** Re-tile immediately — bundling is automatic for every sheet control. */
   const setCount = (next: number) => {
     const v = Math.max(1, Math.min(next, capSafe));
     onSetting({ perSheet: v });
-    // Live re-tile: changing the count immediately re-arranges the sheet.
     onArrangeCount(v);
+  };
+  const setAlignV = (v: GridAlignV) => {
+    onSetting({ alignV: v });
+    onArrangeCount(n, { alignV: v });
+  };
+  const setAlignH = (v: GridAlignH) => {
+    onSetting({ alignH: v });
+    onArrangeCount(n, { alignH: v });
+  };
+  const setMargin = (v: number) => {
+    onSetting({ marginMm: v });
+    onArrangeCount(n, { marginMm: v });
+  };
+  const setGap = (v: number) => {
+    onSetting({ gapMm: v });
+    onArrangeCount(n, { gapMm: v });
   };
   const placedIds = new Set(placements.map((p) => p.itemId));
   const unplacedImages = files.filter(
@@ -634,9 +661,33 @@ export function PhotoInspector({
           ))}
         </div>
         <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
-          Mengubah jumlah langsung mengejajarkan {n} foto di lembar — grid
-          seimbang di tengah, ukuran persis mengikuti preset.
+          Mengubah jumlah langsung mengejajarkan {n} foto di lembar — semua
+          foto terunggah dibungkus grid seimbang sesuai posisi di bawah.
         </p>
+        <Row label="Jajarkan Vertikal">
+          <Segmented
+            value={settings.alignV}
+            onChange={setAlignV}
+            options={[
+              { value: "top", label: "Atas" },
+              { value: "center", label: "Tengah" },
+              { value: "bottom", label: "Bawah" },
+            ]}
+            title="Posisi grid di dalam area cetak — atas, tengah, bawah"
+          />
+        </Row>
+        <Row label="Jajarkan Horizontal">
+          <Segmented
+            value={settings.alignH}
+            onChange={setAlignH}
+            options={[
+              { value: "left", label: "Kiri" },
+              { value: "center", label: "Tengah" },
+              { value: "right", label: "Kanan" },
+            ]}
+            title="Posisi grid horizontal di dalam area cetak"
+          />
+        </Row>
         <div className="grid grid-cols-3 gap-1">
           <button
             type="button"
@@ -678,14 +729,14 @@ export function PhotoInspector({
             value={settings.marginMm}
             min={0}
             max={30}
-            onCommit={(v) => onSetting({ marginMm: v })}
+            onCommit={setMargin}
           />
           <NumField
             label="Jarak Antar Foto (mm)"
             value={settings.gapMm}
             min={0}
             max={20}
-            onCommit={(v) => onSetting({ gapMm: v })}
+            onCommit={setGap}
           />
         </div>
         <Row label="Tanpa Pinggiran">

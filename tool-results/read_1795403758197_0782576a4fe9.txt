@@ -1,0 +1,800 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→// Photo-mode inspector: full photo size presets, Word-like position/size
+     4→     4→// numeric controls, sheet tools (fill / arrange / align / cut lines) and the
+     5→     5→// per-photo list of everything placed on the sheet.
+     6→     6→
+     7→     7→import {
+     8→     8→  AlignCenterHorizontal,
+     9→     9→  AlignCenterVertical,
+    10→    10→  AlignEndHorizontal,
+    11→    11→  AlignEndVertical,
+    12→    12→  AlignStartHorizontal,
+    13→    13→  AlignStartVertical,
+    14→    14→  Copy,
+    15→    15→  Eraser,
+    16→    16→  ImagePlus,
+    17→    17→  LayoutGrid,
+    18→    18→  Minus,
+    19→    19→  Plus,
+    20→    20→  RotateCcw,
+    21→    21→  Rows3,
+    22→    22→  Sparkles,
+    23→    23→  Trash2,
+    24→    24→  Wand2,
+    25→    25→} from "lucide-react";
+    26→    26→import { formatBytes } from "@/lib/paper";
+    27→    27→import type { PhotoAlign } from "@/hooks/use-print-station";
+    28→    28→import {
+    29→    29→  AUTO_ENHANCE_ADJUST,
+    30→    30→  NEUTRAL_ADJUST,
+    31→    31→  type PhotoAdjustments,
+    32→    32→  type PhotoPlacement,
+    33→    33→  type PhotoSettings,
+    34→    34→  type LoadedFile,
+    35→    35→} from "@/lib/print-station/types";
+    36→    36→import {
+    37→    37→  PHOTO_GROUP_LABEL,
+    38→    38→  PHOTO_PRESETS,
+    39→    39→  PRESET_CHIPS,
+    40→    40→  presetDimsLabel,
+    41→    41→  type PhotoPreset,
+    42→    42→  type PhotoPresetGroup,
+    43→    43→} from "@/lib/print-station/photo-sizes";
+    44→    44→import { Segmented } from "./segmented";
+    45→    45→import {
+    46→    46→  Select,
+    47→    47→  SelectContent,
+    48→    48→  SelectGroup,
+    49→    49→  SelectItem,
+    50→    50→  SelectLabel,
+    51→    51→  SelectTrigger,
+    52→    52→  SelectValue,
+    53→    53→} from "@/components/ui/select";
+    54→    54→import { Switch } from "@/components/ui/switch";
+    55→    55→
+    56→    56→function Section({
+    57→    57→  title,
+    58→    58→  children,
+    59→    59→  className = "",
+    60→    60→}: {
+    61→    61→  title: string;
+    62→    62→  children: React.ReactNode;
+    63→    63→  className?: string;
+    64→    64→}) {
+    65→    65→  return (
+    66→    66→    <section className={`border-b border-[#E5E7EB] px-4 py-4 ${className}`}>
+    67→    67→      <h2 className="mb-3 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-[#6B7280]">
+    68→    68→        {title}
+    69→    69→      </h2>
+    70→    70→      <div className="flex flex-col gap-3">{children}</div>
+    71→    71→    </section>
+    72→    72→  );
+    73→    73→}
+    74→    74→
+    75→    75→function Row({ label, children }: { label: string; children: React.ReactNode }) {
+    76→    76→  return (
+    77→    77→    <div className="flex min-h-[28px] items-center justify-between gap-3">
+    78→    78→      <span className="text-[12.5px] text-[#111827]">{label}</span>
+    79→    79→      {children}
+    80→    80→    </div>
+    81→    81→  );
+    82→    82→}
+    83→    83→
+    84→    84→function NumField({
+    85→    85→  label,
+    86→    86→  value,
+    87→    87→  onCommit,
+    88→    88→  min,
+    89→    89→  max,
+    90→    90→  disabled,
+    91→    91→}: {
+    92→    92→  label: string;
+    93→    93→  value: number;
+    94→    94→  onCommit: (v: number) => void;
+    95→    95→  min: number;
+    96→    96→  max: number;
+    97→    97→  disabled?: boolean;
+    98→    98→}) {
+    99→    99→  const fmt = (v: number) => String(Math.round(v * 10) / 10);
+   100→   100→  const commit = (raw: string) => {
+   101→   101→    const parsed = Number(raw.replace(",", "."));
+   102→   102→    if (!Number.isFinite(parsed)) return;
+   103→   103→    onCommit(Math.min(Math.max(parsed, min), max));
+   104→   104→  };
+   105→   105→  // Uncontrolled input keyed by the external value: dragging / resizing on the
+   106→   106→  // canvas remounts it with fresh numbers, while local typing stays untouched.
+   107→   107→  return (
+   108→   108→    <label className="flex min-w-0 flex-1 flex-col gap-1">
+   109→   109→      <span className="font-mono text-[9.5px] uppercase tracking-[0.06em] text-[#6B7280]">
+   110→   110→        {label}
+   111→   111→      </span>
+   112→   112→      <input
+   113→   113→        key={`${label}-${fmt(value)}`}
+   114→   114→        type="number"
+   115→   115→        inputMode="decimal"
+   116→   116→        step="0.5"
+   117→   117→        defaultValue={fmt(value)}
+   118→   118→        disabled={disabled}
+   119→   119→        onBlur={(e) => commit(e.target.value)}
+   120→   120→        onKeyDown={(e) => {
+   121→   121→          if (e.key === "Enter") {
+   122→   122→            e.preventDefault();
+   123→   123→            (e.target as HTMLInputElement).blur();
+   124→   124→          }
+   125→   125→        }}
+   126→   126→        aria-label={label}
+   127→   127→        className="h-8 w-full rounded-md border border-[#E5E7EB] bg-white px-2 font-mono text-[11.5px] tabular-nums text-[#111827] outline-none transition-colors focus:border-[#003399] disabled:opacity-40"
+   128→   128→      />
+   129→   129→    </label>
+   130→   130→  );
+   131→   131→}
+   132→   132→
+   133→   133→function IconBtn({
+   134→   134→  title,
+   135→   135→  onClick,
+   136→   136→  disabled,
+   137→   137→  children,
+   138→   138→  active,
+   139→   139→}: {
+   140→   140→  title: string;
+   141→   141→  onClick: () => void;
+   142→   142→  disabled?: boolean;
+   143→   143→  children: React.ReactNode;
+   144→   144→  active?: boolean;
+   145→   145→}) {
+   146→   146→  return (
+   147→   147→    <button
+   148→   148→      type="button"
+   149→   149→      title={title}
+   150→   150→      aria-label={title}
+   151→   151→      onClick={onClick}
+   152→   152→      disabled={disabled}
+   153→   153→      className={`flex h-8 items-center justify-center rounded-md border transition-colors disabled:opacity-30 disabled:hover:bg-transparent ${
+   154→   154→        active
+   155→   155→          ? "border-[#003399] bg-[#003399]/10 text-[#003399]"
+   156→   156→          : "border-[#E5E7EB] bg-white text-[#374151] hover:bg-[#F9FAFB]"
+   157→   157→      }`}
+   158→   158→    >
+   159→   159→      {children}
+   160→   160→    </button>
+   161→   161→  );
+   162→   162→}
+   163→   163→
+   164→   164→/** Minimal industrial slider row (range input, #003399 accent). */
+   165→   165→function SliderRow({
+   166→   166→  label,
+   167→   167→  value,
+   168→   168→  min,
+   169→   169→  max,
+   170→   170→  step,
+   171→   171→  onChange,
+   172→   172→  format,
+   173→   173→}: {
+   174→   174→  label: string;
+   175→   175→  value: number;
+   176→   176→  min: number;
+   177→   177→  max: number;
+   178→   178→  step: number;
+   179→   179→  onChange: (v: number) => void;
+   180→   180→  format: (v: number) => string;
+   181→   181→}) {
+   182→   182→  return (
+   183→   183→    <label className="flex flex-col gap-0.5">
+   184→   184→      <span className="flex items-center justify-between">
+   185→   185→        <span className="text-[12.5px] text-[#111827]">{label}</span>
+   186→   186→        <span className="font-mono text-[10.5px] tabular-nums text-[#6B7280]">
+   187→   187→          {format(value)}
+   188→   188→        </span>
+   189→   189→      </span>
+   190→   190→      <input
+   191→   191→        type="range"
+   192→   192→        min={min}
+   193→   193→        max={max}
+   194→   194→        step={step}
+   195→   195→        value={value}
+   196→   196→        onChange={(e) => onChange(Number(e.target.value))}
+   197→   197→        aria-label={label}
+   198→   198→        className="h-5 w-full cursor-pointer accent-[#003399]"
+   199→   199→      />
+   200→   200→    </label>
+   201→   201→  );
+   202→   202→}
+   203→   203→
+   204→   204→interface PhotoInspectorProps {
+   205→   205→  placements: PhotoPlacement[];
+   206→   206→  selected: PhotoPlacement | null;
+   207→   207→  files: LoadedFile[];
+   208→   208→  settings: PhotoSettings;
+   209→   209→  preset: PhotoPreset;
+   210→   210→  paperWmm: number;
+   211→   211→  paperHmm: number;
+   212→   212→  beyondMargin: boolean;
+   213→   213→  /** Max copies of the current preset that fit on one sheet. */
+   214→   214→  capacity: number;
+   215→   215→  onSetting: (patch: Partial<PhotoSettings>) => void;
+   216→   216→  /** Borderless toggle — zeroes margin + re-tiles in one tick. */
+   217→   217→  onBorderless: (v: boolean) => void;
+   218→   218→  onPreset: (id: string, customDims?: { wMm: number; hMm: number }) => void;
+   219→   219→  onUpdateSelected: (patch: Partial<PhotoPlacement>) => void;
+   220→   220→  onAlign: (dir: PhotoAlign) => void;
+   221→   221→  onFillSheet: () => void;
+   222→   222→  /** Arrange exactly N preset-sized copies in a grid. */
+   223→   223→  onArrangeCount: (n: number) => void;
+   224→   224→  onArrange: () => void;
+   225→   225→  onDuplicate: () => void;
+   226→   226→  onRemove: () => void;
+   227→   227→  onSelect: (id: string | null) => void;
+   228→   228→  onClear: () => void;
+   229→   229→  onAddImages: () => void;
+   230→   230→}
+   231→   231→
+   232→   232→const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
+   233→   233→
+   234→   234→const COUNT_QUICK: number[] = [2, 4, 6, 8, 9, 12];
+   235→   235→
+   236→   236→export function PhotoInspector({
+   237→   237→  placements,
+   238→   238→  selected,
+   239→   239→  files,
+   240→   240→  settings,
+   241→   241→  preset,
+   242→   242→  paperWmm,
+   243→   243→  paperHmm,
+   244→   244→  beyondMargin,
+   245→   245→  capacity,
+   246→   246→  onSetting,
+   247→   247→  onBorderless,
+   248→   248→  onPreset,
+   249→   249→  onUpdateSelected,
+   250→   250→  onAlign,
+   251→   251→  onFillSheet,
+   252→   252→  onArrangeCount,
+   253→   253→  onArrange,
+   254→   254→  onDuplicate,
+   255→   255→  onRemove,
+   256→   256→  onSelect,
+   257→   257→  onClear,
+   258→   258→  onAddImages,
+   259→   259→}: PhotoInspectorProps) {
+   260→   260→  // "Jumlah Foto" lives in the shared photo settings so this control, photo
+   261→   261→  // uploads and preset changes all drive the same auto-grid count.
+   262→   262→  const capSafe = Math.max(1, Math.min(capacity, 200));
+   263→   263→  const n = Math.max(1, Math.min(settings.perSheet, capSafe));
+   264→   264→  const setCount = (next: number) => {
+   265→   265→    const v = Math.max(1, Math.min(next, capSafe));
+   266→   266→    onSetting({ perSheet: v });
+   267→   267→    // Live re-tile: changing the count immediately re-arranges the sheet.
+   268→   268→    onArrangeCount(v);
+   269→   269→  };
+   270→   270→  const placedIds = new Set(placements.map((p) => p.itemId));
+   271→   271→  const unplacedImages = files.filter(
+   272→   272→    (f) => f.kind === "image" && f.status === "ready" && !!f.url && !placedIds.has(f.id),
+   273→   273→  );
+   274→   274→
+   275→   275→  const setAdjust = (patch: Partial<PhotoAdjustments>) =>
+   276→   276→    onSetting({ adjust: { ...settings.adjust, ...patch } });
+   277→   277→  const pctFmt = (v: number) => `${Math.round(v * 100)}%`;
+   278→   278→
+   279→   279→  const scopeLabel = selected ? "menerapkan ke foto terpilih" : "menerapkan ke semua foto";
+   280→   280→
+   281→   281→  return (
+   282→   282→    <>
+   283→   283→      {/* Ukuran Foto */}
+   284→   284→      <Section title="Ukuran Foto">
+   285→   285→        <Select
+   286→   286→          value={preset.id}
+   287→   287→          onValueChange={(v) => onPreset(v)}
+   288→   288→        >
+   289→   289→          <SelectTrigger
+   290→   290→            aria-label="Ukuran cetak foto"
+   291→   291→            className="h-8 w-full rounded-md border-[#E5E7EB] font-mono text-[11.5px] text-[#111827] shadow-none focus:ring-1 focus:ring-[#003399]"
+   292→   292→          >
+   293→   293→            <SelectValue />
+   294→   294→          </SelectTrigger>
+   295→   295→          <SelectContent className="rounded-md border-[#E5E7EB]">
+   296→   296→            {PRESET_GROUP_ORDER.map((g) => (
+   297→   297→              <SelectGroup key={g}>
+   298→   298→                <SelectLabel className="font-mono text-[9.5px] uppercase tracking-[0.08em] text-[#9CA3AF]">
+   299→   299→                  {PHOTO_GROUP_LABEL[g]}
+   300→   300→                </SelectLabel>
+   301→   301→                {PHOTO_PRESETS.filter((p) => p.group === g).map((p) => (
+   302→   302→                  <SelectItem
+   303→   303→                    key={p.id}
+   304→   304→                    value={p.id}
+   305→   305→                    className="font-mono text-[11.5px] tabular-nums"
+   306→   306→                  >
+   307→   307→                    {p.label}
+   308→   308→                  </SelectItem>
+   309→   309→                ))}
+   310→   310→              </SelectGroup>
+   311→   311→            ))}
+   312→   312→          </SelectContent>
+   313→   313→        </Select>
+   314→   314→        <div className="flex flex-wrap gap-1" role="group" aria-label="Preset ukuran cepat">
+   315→   315→          {PRESET_CHIPS.map((c) => {
+   316→   316→            const active = preset.id === c.id;
+   317→   317→            return (
+   318→   318→              <button
+   319→   319→                key={c.id}
+   320→   320→                type="button"
+   321→   321→                aria-pressed={active}
+   322→   322→                onClick={() => onPreset(c.id)}
+   323→   323→                className={`h-7 rounded-md border px-2 font-mono text-[11px] font-medium tabular-nums transition-colors ${
+   324→   324→                  active
+   325→   325→                    ? "border-[#003399] bg-[#003399] text-white"
+   326→   326→                    : "border-[#E5E7EB] bg-white text-[#374151] hover:bg-[#F9FAFB]"
+   327→   327→                }`}
+   328→   328→              >
+   329→   329→                {c.label}
+   330→   330→              </button>
+   331→   331→            );
+   332→   332→          })}
+   333→   333→        </div>
+   334→   334→        <p className="font-mono text-[10px] tabular-nums text-[#6B7280]">
+   335→   335→          {presetDimsLabel(preset)} • {scopeLabel}
+   336→   336→        </p>
+   337→   337→
+   338→   338→        {preset.group === "custom" ? (
+   339→   339→          <div className="flex gap-2">
+   340→   340→            <NumField
+   341→   341→              label="Lebar (mm)"
+   342→   342→              value={settings.customWMm}
+   343→   343→              min={10}
+   344→   344→              max={paperWmm}
+   345→   345→              onCommit={(v) => onPreset("custom", { wMm: v, hMm: settings.customHMm })}
+   346→   346→            />
+   347→   347→            <NumField
+   348→   348→              label="Tinggi (mm)"
+   349→   349→              value={settings.customHMm}
+   350→   350→              min={10}
+   351→   351→              max={paperHmm}
+   352→   352→              onCommit={(v) => onPreset("custom", { wMm: settings.customWMm, hMm: v })}
+   353→   353→            />
+   354→   354→          </div>
+   355→   355→        ) : null}
+   356→   356→
+   357→   357→        <Row label="Kunci Rasio Aspek">
+   358→   358→          <Switch
+   359→   359→            checked={settings.lockAspect}
+   360→   360→            onCheckedChange={(v) => onSetting({ lockAspect: v })}
+   361→   361→            aria-label="Kunci rasio aspek foto"
+   362→   362→            className="data-[state=checked]:bg-[#003399]"
+   363→   363→          />
+   364→   364→        </Row>
+   365→   365→      </Section>
+   366→   366→
+   367→   367→      {/* Posisi & Ukuran (Word-like) */}
+   368→   368→      <Section
+   369→   369→        title="Posisi & Ukuran Foto"
+   370→   370→        className={selected ? "" : "opacity-60"}
+   371→   371→      >
+   372→   372→        {selected ? (
+   373→   373→          <>
+   374→   374→            <div className="flex gap-2">
+   375→   375→              <NumField
+   376→   376→                label="Posisi X"
+   377→   377→                value={selected.xMm}
+   378→   378→                min={0}
+   379→   379→                max={paperWmm}
+   380→   380→                onCommit={(v) => onUpdateSelected({ xMm: v })}
+   381→   381→              />
+   382→   382→              <NumField
+   383→   383→                label="Posisi Y"
+   384→   384→                value={selected.yMm}
+   385→   385→                min={0}
+   386→   386→                max={paperHmm}
+   387→   387→                onCommit={(v) => onUpdateSelected({ yMm: v })}
+   388→   388→              />
+   389→   389→            </div>
+   390→   390→            <div className="flex gap-2">
+   391→   391→              <NumField
+   392→   392→                label="Lebar"
+   393→   393→                value={selected.wMm}
+   394→   394→                min={10}
+   395→   395→                max={paperWmm}
+   396→   396→                onCommit={(v) =>
+   397→   397→                  onUpdateSelected(
+   398→   398→                    settings.lockAspect
+   399→   399→                      ? {
+   400→   400→                          wMm: v,
+   401→   401→                          hMm: (v * selected.hMm) / selected.wMm,
+   402→   402→                        }
+   403→   403→                      : { wMm: v },
+   404→   404→                  )
+   405→   405→                }
+   406→   406→              />
+   407→   407→              <NumField
+   408→   408→                label="Tinggi"
+   409→   409→                value={selected.hMm}
+   410→   410→                min={10}
+   411→   411→                max={paperHmm}
+   412→   412→                onCommit={(v) =>
+   413→   413→                  onUpdateSelected(
+   414→   414→                    settings.lockAspect
+   415→   415→                      ? {
+   416→   416→                          hMm: v,
+   417→   417→                          wMm: (v * selected.wMm) / selected.hMm,
+   418→   418→                        }
+   419→   419→                      : { hMm: v },
+   420→   420→                  )
+   421→   421→                }
+   422→   422→              />
+   423→   423→            </div>
+   424→   424→            <Row label="Rotasi">
+   425→   425→              <Segmented
+   426→   426→                value={String(selected.rotation)}
+   427→   427→                onChange={(v) => onUpdateSelected({ rotation: Number(v) })}
+   428→   428→                options={[
+   429→   429→                  { value: "0", label: "0°" },
+   430→   430→                  { value: "90", label: "90°" },
+   431→   431→                  { value: "180", label: "180°" },
+   432→   432→                  { value: "270", label: "270°" },
+   433→   433→                ]}
+   434→   434→                title="Rotasi foto"
+   435→   435→              />
+   436→   436→            </Row>
+   437→   437→            <Row label="Isi Bingkai">
+   438→   438→              <Segmented
+   439→   439→                value={selected.fit}
+   440→   440→                onChange={(v) => onUpdateSelected({ fit: v })}
+   441→   441→                options={[
+   442→   442→                  { value: "cover", label: "Potong Penuhi" },
+   443→   443→                  { value: "contain", label: "Tampil Utuh" },
+   444→   444→                ]}
+   445→   445→                title="Cara foto mengisi bingkai"
+   446→   446→              />
+   447→   447→            </Row>
+   448→   448→            {selected.fit === "cover" ? (
+   449→   449→              <div className="flex flex-col gap-2 rounded-md border border-[#E5E7EB] bg-[#F9FAFB] px-3 py-2.5">
+   450→   450→                <span className="font-mono text-[9.5px] uppercase tracking-[0.06em] text-[#6B7280]">
+   451→   451→                  Geser Potongan (potong penuhi)
+   452→   452→                </span>
+   453→   453→                <SliderRow
+   454→   454→                  label="Geser Horizontal"
+   455→   455→                  value={selected.cropX ?? 0}
+   456→   456→                  min={-50}
+   457→   457→                  max={50}
+   458→   458→                  step={1}
+   459→   459→                  onChange={(v) => onUpdateSelected({ cropX: v })}
+   460→   460→                  format={(v) => `${v}%`}
+   461→   461→                />
+   462→   462→                <SliderRow
+   463→   463→                  label="Geser Vertikal"
+   464→   464→                  value={selected.cropY ?? 0}
+   465→   465→                  min={-50}
+   466→   466→                  max={50}
+   467→   467→                  step={1}
+   468→   468→                  onChange={(v) => onUpdateSelected({ cropY: v })}
+   469→   469→                  format={(v) => `${v}%`}
+   470→   470→                />
+   471→   471→                <button
+   472→   472→                  type="button"
+   473→   473→                  onClick={() => onUpdateSelected({ cropX: 0, cropY: 0 })}
+   474→   474→                  className="inline-flex h-7 w-fit items-center gap-1 rounded border border-[#E5E7EB] bg-white px-2 font-mono text-[10px] text-[#374151] transition-colors hover:bg-white hover:text-[#111827]"
+   475→   475→                >
+   476→   476→                  <RotateCcw size={10} strokeWidth={1.5} />
+   477→   477→                  tengah
+   478→   478→                </button>
+   479→   479→              </div>
+   480→   480→            ) : null}
+   481→   481→            <div className="grid grid-cols-6 gap-1">
+   482→   482→              <IconBtn title="Rata kiri" onClick={() => onAlign("left")} disabled={!selected}>
+   483→   483→                <AlignStartVertical size={13} strokeWidth={1.5} />
+   484→   484→              </IconBtn>
+   485→   485→              <IconBtn title="Rata tengah horizontal" onClick={() => onAlign("centerX")} disabled={!selected}>
+   486→   486→                <AlignCenterVertical size={13} strokeWidth={1.5} />
+   487→   487→              </IconBtn>
+   488→   488→              <IconBtn title="Rata kanan" onClick={() => onAlign("right")} disabled={!selected}>
+   489→   489→                <AlignEndVertical size={13} strokeWidth={1.5} />
+   490→   490→              </IconBtn>
+   491→   491→              <IconBtn title="Rata atas" onClick={() => onAlign("top")} disabled={!selected}>
+   492→   492→                <AlignStartHorizontal size={13} strokeWidth={1.5} />
+   493→   493→              </IconBtn>
+   494→   494→              <IconBtn title="Rata tengah vertikal" onClick={() => onAlign("centerY")} disabled={!selected}>
+   495→   495→                <AlignCenterHorizontal size={13} strokeWidth={1.5} />
+   496→   496→              </IconBtn>
+   497→   497→              <IconBtn title="Rata bawah" onClick={() => onAlign("bottom")} disabled={!selected}>
+   498→   498→                <AlignEndHorizontal size={13} strokeWidth={1.5} />
+   499→   499→              </IconBtn>
+   500→   500→            </div>
+   501→   501→            <div className="grid grid-cols-2 gap-1">
+   502→   502→              <button
+   503→   503→                type="button"
+   504→   504→                onClick={onDuplicate}
+   505→   505→                className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+   506→   506→              >
+   507→   507→                <Copy size={12} strokeWidth={1.5} />
+   508→   508→                Duplikat
+   509→   509→              </button>
+   510→   510→              <button
+   511→   511→                type="button"
+   512→   512→                onClick={onRemove}
+   513→   513→                className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+   514→   514→              >
+   515→   515→                <Trash2 size={12} strokeWidth={1.5} />
+   516→   516→                Hapus
+   517→   517→              </button>
+   518→   518→            </div>
+   519→   519→            <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+   520→   520→              Geser langsung di lembar • panah = 1 mm • Shift+panah = 10 mm
+   521→   521→            </p>
+   522→   522→          </>
+   523→   523→        ) : (
+   524→   524→          <p className="text-[12px] leading-relaxed text-[#6B7280]">
+   525→   525→            Pilih salah satu foto pada lembar untuk mengatur posisi, ukuran,
+   526→   526→            rotasi, dan cara pemotongannya.
+   527→   527→          </p>
+   528→   528→        )}
+   529→   529→      </Section>
+   530→   530→
+   531→   531→      {/* Penyesuaian Gambar (Epson Easy Photo Print style) */}
+   532→   532→      <Section title="Penyesuaian Gambar">
+   533→   533→        <SliderRow
+   534→   534→          label="Kecerahan"
+   535→   535→          value={settings.adjust.brightness}
+   536→   536→          min={0.5}
+   537→   537→          max={1.6}
+   538→   538→          step={0.01}
+   539→   539→          onChange={(v) => setAdjust({ brightness: v })}
+   540→   540→          format={pctFmt}
+   541→   541→        />
+   542→   542→        <SliderRow
+   543→   543→          label="Kontras"
+   544→   544→          value={settings.adjust.contrast}
+   545→   545→          min={0.5}
+   546→   546→          max={1.6}
+   547→   547→          step={0.01}
+   548→   548→          onChange={(v) => setAdjust({ contrast: v })}
+   549→   549→          format={pctFmt}
+   550→   550→        />
+   551→   551→        <SliderRow
+   552→   552→          label="Saturasi Warna"
+   553→   553→          value={settings.adjust.saturate}
+   554→   554→          min={0}
+   555→   555→          max={2}
+   556→   556→          step={0.01}
+   557→   557→          onChange={(v) => setAdjust({ saturate: v })}
+   558→   558→          format={pctFmt}
+   559→   559→        />
+   560→   560→        <div className="grid grid-cols-2 gap-1">
+   561→   561→          <button
+   562→   562→            type="button"
+   563→   563→            onClick={() => onSetting({ adjust: { ...AUTO_ENHANCE_ADJUST } })}
+   564→   564→            title="Perbaikan otomatis sekali klik (Epson Auto-Correct)"
+   565→   565→            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[11.5px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+   566→   566→          >
+   567→   567→            <Sparkles size={12} strokeWidth={1.5} />
+   568→   568→            Perbaiki Otomatis
+   569→   569→          </button>
+   570→   570→          <button
+   571→   571→            type="button"
+   572→   572→            onClick={() => onSetting({ adjust: { ...NEUTRAL_ADJUST } })}
+   573→   573→            disabled={
+   574→   574→              settings.adjust.brightness === 1 &&
+   575→   575→              settings.adjust.contrast === 1 &&
+   576→   576→              settings.adjust.saturate === 1
+   577→   577→            }
+   578→   578→            className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+   579→   579→          >
+   580→   580→            <RotateCcw size={12} strokeWidth={1.5} />
+   581→   581→            Netral
+   582→   582→          </button>
+   583→   583→        </div>
+   584→   584→        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+   585→   585→          Berlaku untuk semua foto — hasil cetak mengikuti pratinjau persis.
+   586→   586→        </p>
+   587→   587→      </Section>
+   588→   588→
+   589→   589→      {/* Susun & Lembar */}
+   590→   590→      <Section title="Susun & Lembar">
+   591→   591→        <Row label="Jumlah Foto">
+   592→   592→          <div className="inline-flex items-center rounded-md border border-[#E5E7EB]">
+   593→   593→            <button
+   594→   594→              type="button"
+   595→   595→              aria-label="Kurangi jumlah foto"
+   596→   596→              disabled={n <= 1}
+   597→   597→              onClick={() => setCount(n - 1)}
+   598→   598→              className="flex h-8 w-8 items-center justify-center text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30 disabled:hover:bg-transparent"
+   599→   599→            >
+   600→   600→              <Minus size={13} strokeWidth={1.5} />
+   601→   601→            </button>
+   602→   602→            <span
+   603→   603→              className="w-10 border-x border-[#E5E7EB] text-center font-mono text-[12px] font-medium tabular-nums text-[#111827]"
+   604→   604→              aria-live="polite"
+   605→   605→            >
+   606→   606→              {n}
+   607→   607→            </span>
+   608→   608→            <button
+   609→   609→              type="button"
+   610→   610→              aria-label="Tambah jumlah foto"
+   611→   611→              disabled={n >= capSafe}
+   612→   612→              onClick={() => setCount(n + 1)}
+   613→   613→              className="flex h-8 w-8 items-center justify-center text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30 disabled:hover:bg-transparent"
+   614→   614→            >
+   615→   615→              <Plus size={13} strokeWidth={1.5} />
+   616→   616→            </button>
+   617→   617→          </div>
+   618→   618→        </Row>
+   619→   619→        <div className="flex flex-wrap gap-1" role="group" aria-label="Jumlah foto cepat">
+   620→   620→          {COUNT_QUICK.filter((q) => q <= capSafe).map((q) => (
+   621→   621→            <button
+   622→   622→              key={q}
+   623→   623→              type="button"
+   624→   624→              aria-pressed={n === q}
+   625→   625→              onClick={() => setCount(q)}
+   626→   626→              className={`h-7 min-w-[32px] rounded-md border px-1.5 font-mono text-[11px] font-medium tabular-nums transition-colors ${
+   627→   627→                n === q
+   628→   628→                  ? "border-[#003399] bg-[#003399]/10 text-[#003399]"
+   629→   629→                  : "border-[#E5E7EB] bg-white text-[#374151] hover:bg-[#F9FAFB]"
+   630→   630→              }`}
+   631→   631→            >
+   632→   632→              {q}
+   633→   633→            </button>
+   634→   634→          ))}
+   635→   635→        </div>
+   636→   636→        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+   637→   637→          Mengubah jumlah langsung mengejajarkan {n} foto di lembar — grid
+   638→   638→          seimbang di tengah, ukuran persis mengikuti preset.
+   639→   639→        </p>
+   640→   640→        <div className="grid grid-cols-3 gap-1">
+   641→   641→          <button
+   642→   642→            type="button"
+   643→   643→            onClick={() => onArrangeCount(n)}
+   644→   644→            disabled={placements.length === 0}
+   645→   645→            title={`Susun ulang ${n} foto sesuai preset ${preset.short}`}
+   646→   646→            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#003399] bg-white text-[11px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5 disabled:opacity-30"
+   647→   647→          >
+   648→   648→            <Rows3 size={12} strokeWidth={1.5} />
+   649→   649→            Susun
+   650→   650→          </button>
+   651→   651→          <button
+   652→   652→            type="button"
+   653→   653→            onClick={onFillSheet}
+   654→   654→            disabled={placements.length === 0}
+   655→   655→            title="Isi lembar penuh dengan salinan foto"
+   656→   656→            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#E5E7EB] bg-white text-[11px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+   657→   657→          >
+   658→   658→            <LayoutGrid size={12} strokeWidth={1.5} />
+   659→   659→            Isi Penuh
+   660→   660→          </button>
+   661→   661→          <button
+   662→   662→            type="button"
+   663→   663→            onClick={onArrange}
+   664→   664→            disabled={placements.length === 0}
+   665→   665→            title="Rapikan foto menjadi baris yang rapi"
+   666→   666→            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#E5E7EB] bg-white text-[11px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+   667→   667→          >
+   668→   668→            <Wand2 size={12} strokeWidth={1.5} />
+   669→   669→            Rapikan
+   670→   670→          </button>
+   671→   671→        </div>
+   672→   672→        <p className="font-mono text-[10px] tabular-nums text-[#6B7280]">
+   673→   673→          Kapasitas lembar: {capSafe} foto • {preset.short} • margin {settings.marginMm} mm
+   674→   674→        </p>
+   675→   675→        <div className="flex gap-2">
+   676→   676→          <NumField
+   677→   677→            label="Margin (mm)"
+   678→   678→            value={settings.marginMm}
+   679→   679→            min={0}
+   680→   680→            max={30}
+   681→   681→            onCommit={(v) => onSetting({ marginMm: v })}
+   682→   682→          />
+   683→   683→          <NumField
+   684→   684→            label="Jarak Antar Foto (mm)"
+   685→   685→            value={settings.gapMm}
+   686→   686→            min={0}
+   687→   687→            max={20}
+   688→   688→            onCommit={(v) => onSetting({ gapMm: v })}
+   689→   689→          />
+   690→   690→        </div>
+   691→   691→        <Row label="Tanpa Pinggiran">
+   692→   692→          <Switch
+   693→   693→            checked={settings.borderless}
+   694→   694→            onCheckedChange={onBorderless}
+   695→   695→            aria-label="Cetak tanpa pinggiran"
+   696→   696→            className="data-[state=checked]:bg-[#003399]"
+   697→   697→          />
+   698→   698→        </Row>
+   699→   699→        {settings.borderless ? (
+   700→   700→          <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
+   701→   701→            Margin diset 0 mm — foto menjalar ke tepi kertas. Aktifkan juga
+   702→   702→            Borderless pada dialog driver Epson agar hasil tanpa garis putih.
+   703→   703→          </p>
+   704→   704→        ) : null}
+   705→   705→        <Row label="Garis Potong">
+   706→   706→          <Switch
+   707→   707→            checked={settings.cutLines}
+   708→   708→            onCheckedChange={(v) => onSetting({ cutLines: v })}
+   709→   709→            aria-label="Tampilkan garis potong"
+   710→   710→            className="data-[state=checked]:bg-[#003399]"
+   711→   711→          />
+   712→   712→        </Row>
+   713→   713→        {beyondMargin ? (
+   714→   714→          <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
+   715→   715→            Ada foto melewati area margin — geser ke dalam garis putus-putus
+   716→   716→            agar tidak terpotong driver Epson.
+   717→   717→          </p>
+   718→   718→        ) : null}
+   719→   719→        {unplacedImages.length > 0 ? (
+   720→   720→          <button
+   721→   721→            type="button"
+   722→   722→            onClick={onAddImages}
+   723→   723→            className="flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+   724→   724→          >
+   725→   725→            <ImagePlus size={12} strokeWidth={1.5} />
+   726→   726→            Tambah {unplacedImages.length} foto dari daftar
+   727→   727→          </button>
+   728→   728→        ) : null}
+   729→   729→        {placements.length > 0 ? (
+   730→   730→          <button
+   731→   731→            type="button"
+   732→   732→            onClick={onClear}
+   733→   733→            className="mx-auto flex items-center gap-1 rounded px-1.5 py-1 font-mono text-[10px] text-[#9CA3AF] underline decoration-[#E5E7EB] underline-offset-2 transition-colors hover:text-[#6B7280]"
+   734→   734→          >
+   735→   735→            <Eraser size={10} strokeWidth={1.5} />
+   736→   736→            kosongkan lembar
+   737→   737→          </button>
+   738→   738→        ) : null}
+   739→   739→      </Section>
+   740→   740→
+   741→   741→      {/* Foto di Lembar */}
+   742→   742→      <Section title={`Foto di Lembar (${placements.length})`}>
+   743→   743→        {placements.length === 0 ? (
+   744→   744→          <p className="text-[12px] leading-relaxed text-[#6B7280]">
+   745→   745→            Belum ada foto. Unggah PNG/JPG lewat area unggah, lalu foto langsung
+   746→   746→            diletakkan di lembar.
+   747→   747→          </p>
+   748→   748→        ) : (
+   749→   749→          <div className="ps-scroll flex max-h-56 flex-col gap-1 overflow-y-auto">
+   750→   750→            {placements.map((p, i) => {
+   751→   751→              const item = files.find((f) => f.id === p.itemId);
+   752→   752→              const active = p.id === selected?.id;
+   753→   753→              return (
+   754→   754→                <div
+   755→   755→                  key={p.id}
+   756→   756→                  role="button"
+   757→   757→                  tabIndex={0}
+   758→   758→                  aria-pressed={active}
+   759→   759→                  aria-label={`Pilih foto ${i + 1}`}
+   760→   760→                  onClick={() => onSelect(p.id)}
+   761→   761→                  onKeyDown={(e) => {
+   762→   762→                    if (e.key === "Enter" || e.key === " ") {
+   763→   763→                      e.preventDefault();
+   764→   764→                      onSelect(p.id);
+   765→   765→                    }
+   766→   766→                  }}
+   767→   767→                  className={`group flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 transition-colors ${
+   768→   768→                    active
+   769→   769→                      ? "border-[#003399] bg-[#003399]/5"
+   770→   770→                      : "border-transparent hover:border-[#E5E7EB] hover:bg-[#F9FAFB]"
+   771→   771→                  }`}
+   772→   772→                >
+   773→   773→                  {item?.url ? (
+   774→   774→                    <img
+   775→   775→                      src={item.url}
+   776→   776→                      alt=""
+   777→   777→                      className="h-9 w-9 shrink-0 rounded-[2px] border border-[#E5E7EB] object-cover"
+   778→   778→                    />
+   779→   779→                  ) : (
+   780→   780→                    <div className="h-9 w-9 shrink-0 rounded-[2px] border border-[#E5E7EB] bg-[#F3F4F6]" />
+   781→   781→                  )}
+   782→   782→                  <div className="min-w-0 flex-1">
+   783→   783→                    <p className="truncate text-[11.5px] font-medium text-[#111827]">
+   784→   784→                      {item?.name ?? "—"}
+   785→   785→                    </p>
+   786→   786→                    <p className="font-mono text-[9.5px] tabular-nums text-[#6B7280]">
+   787→   787→                      #{i + 1} • {Math.round(p.wMm)} × {Math.round(p.hMm)} mm
+   788→   788→                      {item ? ` • ${formatBytes(item.sizeBytes)}` : ""}
+   789→   789→                    </p>
+   790→   790→                  </div>
+   791→   791→                </div>
+   792→   792→              );
+   793→   793→            })}
+   794→   794→          </div>
+   795→   795→        )}
+   796→   796→      </Section>
+   797→   797→    </>
+   798→   798→  );
+   799→   799→}
+   800→   800→

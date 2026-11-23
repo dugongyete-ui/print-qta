@@ -21,6 +21,8 @@ import type {
   PhotoAlign,
 } from "@/hooks/use-print-station";
 import type {
+  GridAlignH,
+  GridAlignV,
   PhotoPlacement,
   PhotoSettings,
 } from "@/lib/print-station/types";
@@ -84,8 +86,17 @@ export interface PhotoPanelData {
   onUpdateSelected: (patch: Partial<PhotoPlacement>) => void;
   onAlign: (dir: PhotoAlign) => void;
   onFillSheet: () => void;
-  /** Arrange exactly N preset-sized copies in a grid. */
-  onArrangeCount: (n: number) => void;
+  /** Arrange exactly N preset-sized copies in a grid; opts override stale
+   * settings in the same tick (margin / gap / alignment changes). */
+  onArrangeCount: (
+    n: number,
+    opts?: {
+      marginMm?: number;
+      gapMm?: number;
+      alignV?: GridAlignV;
+      alignH?: GridAlignH;
+    },
+  ) => void;
   onArrange: () => void;
   onDuplicate: () => void;
   onRemove: () => void;

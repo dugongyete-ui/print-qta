@@ -23,6 +23,8 @@ import {
   MIN_PHOTO_MM,
   getPaperType,
   type DocxRender,
+  type GridAlignH,
+  type GridAlignV,
   type LoadedFile,
   type PhotoPlacement,
   type PhotoSettings,
@@ -762,11 +764,12 @@ export function usePrintStation() {
   /**
    * Auto-grid arrange — the print-shop "ngejajar N foto" flow. Tiles N slots
    * sized to the current preset (or explicit dims) in a balanced grid
-   * (6 → 3×2, 8 → 4×2, 9 → 3×3) centered inside the printable area;
-   * portrait / landscape is picked by whichever capacity fits N. Slots are
-   * filled round-robin with the distinct ready photos on the sheet; a
-   * hand-picked photo duplicates itself across the whole grid instead
-   * (unless ignoreSelection — used by preset changes & intake re-tiles).
+   * (6 → 3×2, 8 → 4×2, 9 → 3×3) aligned inside the printable area
+   * (top / center / bottom × left / center / right); portrait / landscape is
+   * picked by whichever capacity fits N. Slots are always filled round-robin
+   * with every distinct ready photo on the sheet — changing the count never
+   * collapses the sheet into copies of a hand-picked photo (use "Isi Penuh"
+   * for that).
    */
   const arrangePhotoCopies = useCallback(
     (
@@ -774,11 +777,13 @@ export function usePrintStation() {
       options?: {
         dims?: { wMm: number; hMm: number };
         auto?: boolean;
-        ignoreSelection?: boolean;
         /** Explicit margin override — used when margin changes and re-tile
          * happens in the same tick (borderless toggle), where the settings
          * ref is still stale. */
         marginMm?: number;
+        gapMm?: number;
+        alignV?: GridAlignV;
+        alignH?: GridAlignH;
       },
     ) => {
       const list = photoPlacementsRef.current;
@@ -791,7 +796,9 @@ export function usePrintStation() {
       const pw = Math.min(options?.dims ? options.dims.wMm : presetW, paperW);
       const ph = Math.min(options?.dims ? options.dims.hMm : presetH, paperH);
       const margin = options?.marginMm ?? ps.marginMm;
-      const gap = ps.gapMm;
+      const gap = options?.gapMm ?? ps.gapMm;
+      const alignV = options?.alignV ?? ps.alignV;
+      const alignH = options?.alignH ?? ps.alignH;
       const printW = paperW - 2 * margin;
       const printH = paperH - 2 * margin;
 
@@ -848,47 +855,51 @@ export function usePrintStation() {
       const h = useLandscape ? pw : ph;
       const rows = Math.ceil(total / cols);
 
-      // Slot sources: a hand-picked photo duplicates itself; otherwise the
-      // distinct ready images already on the sheet fill slots round-robin.
+      // Slot sources: the distinct ready images already on the sheet fill
+      // slots round-robin — every uploaded photo stays on the grid.
       let sources: string[] = [];
-      const sel = options?.ignoreSelection
-        ? null
-        : list.find((x) => x.id === photoSelectedIdRef.current);
-      if (sel) {
-        sources = [sel.itemId];
-      } else {
-        const seen = new Set<string>();
-        for (const p of list) {
-          if (seen.has(p.itemId)) continue;
-          const it = filesRef.current.find(
-            (f) =>
-              f.id === p.itemId &&
-              f.kind === "image" &&
-              f.status === "ready" &&
-              !!f.url,
-          );
-          if (it) {
-            seen.add(p.itemId);
-            sources.push(p.itemId);
-          }
+      const seen = new Set<string>();
+      for (const p of list) {
+        if (seen.has(p.itemId)) continue;
+        const it = filesRef.current.find(
+          (f) =>
+            f.id === p.itemId &&
+            f.kind === "image" &&
+            f.status === "ready" &&
+            !!f.url,
+        );
+        if (it) {
+          seen.add(p.itemId);
+          sources.push(p.itemId);
         }
       }
       if (sources.length === 0) sources = [list[0].itemId];
 
-      const gy = (printH - (rows * h + (rows - 1) * gap)) / 2;
+      const gridH = rows * h + (rows - 1) * gap;
+      const gy =
+        alignV === "top"
+          ? margin
+          : alignV === "bottom"
+            ? margin + printH - gridH
+            : margin + (printH - gridH) / 2;
       const out: PhotoPlacement[] = [];
       for (let r = 0; r < rows; r++) {
         const inRow = Math.min(total - r * cols, cols);
         const rowW = inRow * w + (inRow - 1) * gap;
-        const gx = (printW - rowW) / 2;
+        const gx =
+          alignH === "left"
+            ? margin
+            : alignH === "right"
+              ? margin + printW - rowW
+              : margin + (printW - rowW) / 2;
         for (let c = 0; c < inRow; c++) {
           const itemId = sources[(r * cols + c) % sources.length];
           const src = list.find((p) => p.itemId === itemId);
           out.push({
             id: newPhotoId(),
             itemId,
-            xMm: margin + gx + c * (w + gap),
-            yMm: margin + gy + r * (h + gap),
+            xMm: gx + c * (w + gap),
+            yMm: gy + r * (h + gap),
             wMm: w,
             hMm: h,
             rotation: 0,
@@ -919,7 +930,9 @@ export function usePrintStation() {
       }
       if (!options?.auto || out.length > 1) {
         toast.success(`${out.length} foto tersusun otomatis`, {
-          description: `${useLandscape ? "Lanskap" : "Potret"} • ${cols} kolom × ${rows} baris • jarak ${gap} mm`,
+          description: `${useLandscape ? "Lanskap" : "Potret"} • ${cols} kolom × ${rows} baris • ${
+            alignV === "top" ? "rata atas" : alignV === "bottom" ? "rata bawah" : "di tengah"
+          } • jarak ${gap} mm`,
         });
       }
     },
@@ -937,11 +950,11 @@ export function usePrintStation() {
     }
     intakeTimerRef.current = window.setTimeout(() => {
       intakeTimerRef.current = null;
-      if (layoutTouchedRef.current) return;
       if (photoPlacementsRef.current.length === 0) return;
+      // Every upload batch re-bundles the whole grid — "dibungkus": picking
+      // the count is the only decision, tiling is always automatic.
       arrangePhotoCopies(photoSettingsRef.current.perSheet, {
         auto: true,
-        ignoreSelection: true,
       });
     }, 350);
   }, [arrangePhotoCopies]);
@@ -962,7 +975,6 @@ export function usePrintStation() {
       if (list.length === 0) return;
       arrangePhotoCopies(photoSettingsRef.current.perSheet, {
         auto: true,
-        ignoreSelection: true,
         marginMm: next ? 0 : DEFAULT_PHOTO_SETTINGS.marginMm,
       });
     },
@@ -1006,11 +1018,11 @@ export function usePrintStation() {
         paperH,
       );
       // Untouched auto-grid sheet: the preset drives the whole layout —
-      // re-tile every copy to the new size at once.
+      // re-tile every copy to the new size at once. A hand-tuned sheet keeps
+      // its placement (sizes change in place) instead of reshuffling.
       if (!layoutTouchedRef.current && photoPlacementsRef.current.length > 0) {
         arrangePhotoCopies(ps.perSheet, {
           dims: { wMm: w, hMm: h },
-          ignoreSelection: true,
         });
         return;
       }

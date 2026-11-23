@@ -148,6 +148,11 @@ export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 export type PhotoFit = "cover" | "contain";
 
+/** Vertical grid alignment inside the printable area (Word-like). */
+export type GridAlignV = "top" | "center" | "bottom";
+/** Horizontal grid alignment inside the printable area. */
+export type GridAlignH = "left" | "center" | "right";
+
 /** One photo placed on the photo sheet. Coordinates are mm on paper. */
 export interface PhotoPlacement {
   id: string;
@@ -207,6 +212,9 @@ export interface PhotoSettings {
    * uploaded — the print-shop "cetak 6 lembar pas foto" flow.
    */
   perSheet: number;
+  /** Grid alignment inside the printable area — "dijajarkan di atas" dll. */
+  alignV: GridAlignV;
+  alignH: GridAlignH;
   /** Draw dashed cut guides around each photo (pas-foto sheets). */
   cutLines: boolean;
   /** Keep width/height ratio when resizing (Word-like aspect lock). */
@@ -223,6 +231,8 @@ export const DEFAULT_PHOTO_SETTINGS: PhotoSettings = {
   borderless: false,
   adjust: { ...NEUTRAL_ADJUST },
   perSheet: 6,
+  alignV: "top",
+  alignH: "center",
   cutLines: true,
   lockAspect: true,
   customWMm: 102,
