@@ -3,8 +3,10 @@
 // Word-like photo sheet editor.
 // Free drag + 8-handle resize on a true-to-scale paper canvas, with smart
 // snapping to the printable margins, page center and sibling photo edges.
-// Geometry is millimeter-based (k = px/mm scale) so the editor, the preview
-// and the print rasterizer stay in perfect agreement.
+// Word-like multi-selection: Ctrl/Shift+click, marquee lasso on the empty
+// sheet and a tap-to-add touch mode — dragging any selected photo moves the
+// WHOLE selection as a group. Geometry is millimeter-based (k = px/mm scale)
+// so the editor, the preview and the print rasterizer stay in agreement.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ImagePlus } from "lucide-react";
@@ -33,22 +35,56 @@ interface PhotoCanvasProps {
   k: number;
   placements: PhotoPlacement[];
   files: LoadedFile[];
-  selectedId: string | null;
+  /** All selected placement ids — the last one is the primary (handles/badge). */
+  selectedIds: string[];
   marginMm: number;
   lockAspect: boolean;
   cutLines: boolean;
   grayscale: boolean;
   /** Sheet-wide adjustments — must match the print raster exactly. */
   adjust?: PhotoAdjustments;
-  onSelect: (id: string | null) => void;
-  onUpdate: (id: string, patch: Partial<PhotoPlacement>) => void;
-  onRemove: (id: string) => void;
-  onDuplicate: (id: string) => void;
+  /** Touch-friendly multi-select: tapping a photo adds it to the selection. */
+  multiMode: boolean;
+  onSelect: (id: string | null, additive?: boolean) => void;
+  /** Replace the whole selection (marquee-lasso result). */
+  onSelectIds: (ids: string[]) => void;
+  onSelectAll: () => void;
+  onUpdateMany: (
+    updates: Array<{ id: string; patch: Partial<PhotoPlacement> }>,
+  ) => void;
+  onRemove: (ids: string[]) => void;
+  onDuplicate: (ids: string[]) => void;
 }
 
 type Gesture =
-  | { kind: "move"; id: string; px0: number; py0: number; x0: number; y0: number }
-  | { kind: "resize"; id: string; dir: HandleDir; px0: number; py0: number; orig: PhotoPlacement };
+  | {
+      kind: "move";
+      ids: string[];
+      grabId: string;
+      px0: number;
+      py0: number;
+      origins: Map<string, { x: number; y: number }>;
+      /** Set when the grab may still become a tap-to-toggle (touch mode). */
+      tapToggleId: string | null;
+      movedPx: number;
+    }
+  | {
+      kind: "resize";
+      id: string;
+      dir: HandleDir;
+      px0: number;
+      py0: number;
+      orig: PhotoPlacement;
+    }
+  | {
+      kind: "marquee";
+      rect: DOMRect;
+      x0: number;
+      y0: number;
+      px0: number;
+      py0: number;
+      moved: boolean;
+    };
 
 /** Visual bounding box of a placement (accounts for 90-step rotation). */
 function bboxOf(p: PhotoPlacement): { x: number; y: number; w: number; h: number } {
@@ -109,6 +145,26 @@ function resizePlacement(
   return { xMm: ncx - w2 / 2, yMm: ncy - h2 / 2, wMm: w2, hMm: h2 };
 }
 
+function attachWindowListeners(
+  onMove: (ev: PointerEvent) => void,
+  onUp: (ev?: Event) => void,
+): void {
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+  window.addEventListener("blur", onUp);
+}
+
+function detachWindowListeners(
+  onMove: (ev: PointerEvent) => void,
+  onUp: (ev?: Event) => void,
+): void {
+  window.removeEventListener("pointermove", onMove);
+  window.removeEventListener("pointerup", onUp);
+  window.removeEventListener("pointercancel", onUp);
+  window.removeEventListener("blur", onUp);
+}
+
 export function PhotoCanvas(props: PhotoCanvasProps) {
   const {
     paperWmm,
@@ -116,14 +172,17 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     k,
     placements,
     files,
-    selectedId,
+    selectedIds,
     marginMm,
     lockAspect,
     cutLines,
     grayscale,
     adjust,
+    multiMode,
     onSelect,
-    onUpdate,
+    onSelectIds,
+    onSelectAll,
+    onUpdateMany,
     onRemove,
     onDuplicate,
   } = props;
@@ -133,7 +192,8 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
   const kRef = useRef(k);
   const lockRef = useRef(lockAspect);
   const paperRef = useRef({ wMm: paperWmm, hMm: paperHmm });
-  const selectedRef = useRef(selectedId);
+  const selectedIdsRef = useRef(selectedIds);
+  const multiModeRef = useRef(multiMode);
   // Sync latest props into refs after commit — gesture/keyboard handlers read
   // them at event time (never during render).
   useEffect(() => {
@@ -141,12 +201,21 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     kRef.current = k;
     lockRef.current = lockAspect;
     paperRef.current = { wMm: paperWmm, hMm: paperHmm };
-    selectedRef.current = selectedId;
-  }, [placements, k, lockAspect, paperWmm, paperHmm, selectedId]);
+    selectedIdsRef.current = selectedIds;
+    multiModeRef.current = multiMode;
+  }, [placements, k, lockAspect, paperWmm, paperHmm, selectedIds, multiMode]);
   const [guides, setGuides] = useState<{ v: number | null; h: number | null }>({
     v: null,
     h: null,
   });
+  const [marquee, setMarquee] = useState<{
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  } | null>(null);
+
+  const primaryId = selectedIds.length > 0 ? selectedIds[selectedIds.length - 1] : null;
 
   const sheetW = Math.round(paperWmm * k);
   const sheetH = Math.round(paperHmm * k);
@@ -155,104 +224,243 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
   const endGesture = useCallback(() => {
     gestureRef.current = null;
     setGuides({ v: null, h: null });
+    setMarquee(null);
   }, []);
 
-  const beginGesture = useCallback(
-    (g: Gesture, e: React.PointerEvent) => {
+  /** Group move: every id in `ids` translates by the same mm delta. */
+  const beginMoveGesture = useCallback(
+    (
+      ids: string[],
+      grabId: string,
+      e: React.PointerEvent,
+      tapToggleId: string | null,
+    ) => {
       e.stopPropagation();
       e.preventDefault();
-      onSelect(g.id);
-      gestureRef.current = g;
+      const origins = new Map<string, { x: number; y: number }>();
+      for (const p of placementsRef.current) {
+        if (ids.includes(p.id)) origins.set(p.id, { x: p.xMm, y: p.yMm });
+      }
+      gestureRef.current = {
+        kind: "move",
+        ids,
+        grabId,
+        px0: e.clientX,
+        py0: e.clientY,
+        origins,
+        tapToggleId,
+        movedPx: 0,
+      };
       const onMove = (ev: PointerEvent) => {
         const cur = gestureRef.current;
-        if (!cur) return;
+        if (!cur || cur.kind !== "move") return;
+        const dxPx = ev.clientX - cur.px0;
+        const dyPx = ev.clientY - cur.py0;
+        cur.movedPx = Math.max(cur.movedPx, Math.abs(dxPx), Math.abs(dyPx));
         const scale = kRef.current || 1;
-        const dx = (ev.clientX - cur.px0) / scale;
-        const dy = (ev.clientY - cur.py0) / scale;
-        if (cur.kind === "move") {
-          let x = cur.x0 + dx;
-          let y = cur.y0 + dy;
-          // smart snapping (Word-like guides)
-          const { wMm: paperW, hMm: paperH } = paperRef.current;
-          const tolerance = 6 / scale;
-          const me = placementsRef.current.find((p) => p.id === cur.id);
-          if (me) {
-            const moved = { ...me, xMm: x, yMm: y };
-            const bb = bboxOf(moved);
-            const tx: number[] = [0, marginMm, paperW - marginMm, paperW / 2, paperW];
-            const ty: number[] = [0, marginMm, paperH - marginMm, paperH / 2, paperH];
-            for (const o of placementsRef.current) {
-              if (o.id === cur.id) continue;
-              const ob = bboxOf(o);
-              tx.push(ob.x, ob.x + ob.w, ob.x + ob.w / 2);
-              ty.push(ob.y, ob.y + ob.h, ob.y + ob.h / 2);
-            }
-            let bestX: { d: number; t: number } | null = null;
-            let bestY: { d: number; t: number } | null = null;
-            for (const t of tx) {
-              for (const e2 of [bb.x, bb.x + bb.w, bb.x + bb.w / 2]) {
-                const d = t - e2;
-                if (Math.abs(d) <= tolerance && (!bestX || Math.abs(d) < Math.abs(bestX.d))) {
-                  bestX = { d, t };
-                }
-              }
-            }
-            for (const t of ty) {
-              for (const e2 of [bb.y, bb.y + bb.h, bb.y + bb.h / 2]) {
-                const d = t - e2;
-                if (Math.abs(d) <= tolerance && (!bestY || Math.abs(d) < Math.abs(bestY.d))) {
-                  bestY = { d, t };
-                }
-              }
-            }
-            if (bestX) x += bestX.d;
-            if (bestY) y += bestY.d;
-            setGuides({ v: bestX ? bestX.t : null, h: bestY ? bestY.t : null });
+        let dx = dxPx / scale;
+        let dy = dyPx / scale;
+        // smart snapping (Word-like guides) — anchored on the grabbed photo
+        const { wMm: paperW, hMm: paperH } = paperRef.current;
+        const tolerance = 6 / scale;
+        const me = placementsRef.current.find((p) => p.id === cur.grabId);
+        const grabOrigin = cur.origins.get(cur.grabId);
+        if (me && grabOrigin) {
+          const moved = { ...me, xMm: grabOrigin.x + dx, yMm: grabOrigin.y + dy };
+          const bb = bboxOf(moved);
+          const tx: number[] = [0, marginMm, paperW - marginMm, paperW / 2, paperW];
+          const ty: number[] = [0, marginMm, paperH - marginMm, paperH / 2, paperH];
+          for (const o of placementsRef.current) {
+            if (cur.ids.includes(o.id)) continue;
+            const ob = bboxOf(o);
+            tx.push(ob.x, ob.x + ob.w, ob.x + ob.w / 2);
+            ty.push(ob.y, ob.y + ob.h, ob.y + ob.h / 2);
           }
-          onUpdate(cur.id, { xMm: x, yMm: y });
-        } else {
-          const r = resizePlacement(cur.orig, cur.dir, dx, dy, lockRef.current);
-          onUpdate(cur.id, r);
+          let bestX: { d: number; t: number } | null = null;
+          let bestY: { d: number; t: number } | null = null;
+          for (const t of tx) {
+            for (const e2 of [bb.x, bb.x + bb.w, bb.x + bb.w / 2]) {
+              const d = t - e2;
+              if (Math.abs(d) <= tolerance && (!bestX || Math.abs(d) < Math.abs(bestX.d))) {
+                bestX = { d, t };
+              }
+            }
+          }
+          for (const t of ty) {
+            for (const e2 of [bb.y, bb.y + bb.h, bb.y + bb.h / 2]) {
+              const d = t - e2;
+              if (Math.abs(d) <= tolerance && (!bestY || Math.abs(d) < Math.abs(bestY.d))) {
+                bestY = { d, t };
+              }
+            }
+          }
+          if (bestX) dx += bestX.d;
+          if (bestY) dy += bestY.d;
+          setGuides({ v: bestX ? bestX.t : null, h: bestY ? bestY.t : null });
         }
+        onUpdateMany(
+          cur.ids
+            .filter((id) => cur.origins.has(id))
+            .map((id) => {
+              const o = cur.origins.get(id)!;
+              return { id, patch: { xMm: o.x + dx, yMm: o.y + dy } };
+            }),
+        );
       };
       const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-        window.removeEventListener("blur", onUp);
+        detachWindowListeners(onMove, onUp);
+        const cur = gestureRef.current;
+        if (
+          cur &&
+          cur.kind === "move" &&
+          cur.tapToggleId &&
+          cur.movedPx < 4
+        ) {
+          // touch "Pilih Banyak": a tap (no drag) toggles the photo in
+          onSelect(cur.tapToggleId, true);
+        }
         endGesture();
       };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
-      window.addEventListener("pointercancel", onUp);
-      window.addEventListener("blur", onUp);
+      attachWindowListeners(onMove, onUp);
     },
-    [onSelect, onUpdate, marginMm, endGesture],
+    [onUpdateMany, onSelect, marginMm, endGesture],
   );
 
   const beginMove = useCallback(
     (p: PhotoPlacement, e: React.PointerEvent) => {
-      beginGesture(
-        { kind: "move", id: p.id, px0: e.clientX, py0: e.clientY, x0: p.xMm, y0: p.yMm },
-        e,
-      );
+      const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+      if (additive) {
+        // Ctrl/Shift+click toggles into the multi-selection (Word-like);
+        // no drag so building a group never accidentally moves photos.
+        e.stopPropagation();
+        e.preventDefault();
+        onSelect(p.id, true);
+        return;
+      }
+      const sel = selectedIdsRef.current;
+      if (multiModeRef.current) {
+        if (sel.includes(p.id)) {
+          beginMoveGesture([...sel], p.id, e, null);
+        } else {
+          // tap adds it to the selection, drag moves just this photo
+          beginMoveGesture([p.id], p.id, e, p.id);
+        }
+        return;
+      }
+      if (sel.includes(p.id)) {
+        // already in the (possibly multi) selection — drag moves the group
+        beginMoveGesture([...sel], p.id, e, null);
+      } else {
+        onSelect(p.id);
+        beginMoveGesture([p.id], p.id, e, null);
+      }
     },
-    [beginGesture],
+    [beginMoveGesture, onSelect],
   );
 
   const beginResize = useCallback(
     (p: PhotoPlacement, dir: HandleDir, e: React.PointerEvent) => {
-      beginGesture(
-        { kind: "resize", id: p.id, dir, px0: e.clientX, py0: e.clientY, orig: p },
-        e,
-      );
+      e.stopPropagation();
+      e.preventDefault();
+      gestureRef.current = {
+        kind: "resize",
+        id: p.id,
+        dir,
+        px0: e.clientX,
+        py0: e.clientY,
+        orig: p,
+      };
+      const onMove = (ev: PointerEvent) => {
+        const cur = gestureRef.current;
+        if (!cur || cur.kind !== "resize") return;
+        const scale = kRef.current || 1;
+        const dx = (ev.clientX - cur.px0) / scale;
+        const dy = (ev.clientY - cur.py0) / scale;
+        const r = resizePlacement(cur.orig, cur.dir, dx, dy, lockRef.current);
+        onUpdateMany([{ id: cur.id, patch: r }]);
+      };
+      const onUp = () => {
+        detachWindowListeners(onMove, onUp);
+        endGesture();
+      };
+      attachWindowListeners(onMove, onUp);
     },
-    [beginGesture],
+    [onUpdateMany, endGesture],
   );
 
-  // -- keyboard nudge / delete / duplicate (Word-like) ------------------------
+  // -- marquee lasso on the empty sheet --------------------------------------
+  const onSheetPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.target !== e.currentTarget) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const scale = kRef.current || 1;
+      const x0 = (e.clientX - rect.left) / scale;
+      const y0 = (e.clientY - rect.top) / scale;
+      gestureRef.current = {
+        kind: "marquee",
+        rect,
+        x0,
+        y0,
+        px0: e.clientX,
+        py0: e.clientY,
+        moved: false,
+      };
+      const onMove = (ev: PointerEvent) => {
+        const cur = gestureRef.current;
+        if (!cur || cur.kind !== "marquee") return;
+        if (
+          Math.abs(ev.clientX - cur.px0) > 4 ||
+          Math.abs(ev.clientY - cur.py0) > 4
+        ) {
+          cur.moved = true;
+        }
+        const x = (ev.clientX - cur.rect.left) / scale;
+        const y = (ev.clientY - cur.rect.top) / scale;
+        setMarquee({
+          x: Math.min(x, cur.x0),
+          y: Math.min(y, cur.y0),
+          w: Math.abs(x - cur.x0),
+          h: Math.abs(y - cur.y0),
+        });
+      };
+      const onUp = (ev?: Event) => {
+        detachWindowListeners(onMove, onUp);
+        const cur = gestureRef.current;
+        if (cur && cur.kind === "marquee" && cur.moved && ev) {
+          const pe = ev as PointerEvent;
+          const x1 = (pe.clientX - cur.rect.left) / scale;
+          const y1 = (pe.clientY - cur.rect.top) / scale;
+          const rx = Math.min(x1, cur.x0);
+          const ry = Math.min(y1, cur.y0);
+          const rw = Math.abs(x1 - cur.x0);
+          const rh = Math.abs(y1 - cur.y0);
+          const ids = placementsRef.current
+            .filter((p) => {
+              const bb = bboxOf(p);
+              return (
+                bb.x < rx + rw &&
+                bb.x + bb.w > rx &&
+                bb.y < ry + rh &&
+                bb.y + bb.h > ry
+              );
+            })
+            .map((p) => p.id);
+          onSelectIds(ids);
+        } else if (cur && cur.kind === "marquee" && !cur.moved) {
+          // plain click on the empty sheet — clear the selection
+          onSelect(null);
+        }
+        endGesture();
+      };
+      attachWindowListeners(onMove, onUp);
+    },
+    [onSelectIds, onSelect, endGesture],
+  );
+
+  // -- keyboard: group nudge / delete / duplicate / select-all ---------------
   useEffect(() => {
-    if (!selectedId) return;
+    if (placements.length === 0) return;
     const handler = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (
@@ -264,36 +472,36 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
       ) {
         return;
       }
-      const id = selectedRef.current;
-      if (!id) return;
-      const sel = placementsRef.current.find((p) => p.id === id);
-      if (!sel) return;
+      const sel = selectedIdsRef.current;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        onSelectAll();
+        return;
+      }
+      if (sel.length === 0) return;
       const step = e.shiftKey ? 10 : 1;
-      if (e.key === "ArrowLeft") {
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
         e.preventDefault();
-        onUpdate(id, { xMm: sel.xMm - step });
-      } else if (e.key === "ArrowRight") {
-        e.preventDefault();
-        onUpdate(id, { xMm: sel.xMm + step });
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        onUpdate(id, { yMm: sel.yMm - step });
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        onUpdate(id, { yMm: sel.yMm + step });
+        const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+        const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+        onUpdateMany(
+          placementsRef.current
+            .filter((p) => sel.includes(p.id))
+            .map((p) => ({ id: p.id, patch: { xMm: p.xMm + dx, yMm: p.yMm + dy } })),
+        );
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
-        onRemove(id);
+        onRemove(sel);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
         e.preventDefault();
-        onDuplicate(id);
+        onDuplicate(sel);
       } else if (e.key === "Escape") {
         onSelect(null);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [selectedId, onUpdate, onRemove, onDuplicate, onSelect]);
+  }, [placements.length, onSelectAll, onUpdateMany, onRemove, onDuplicate, onSelect]);
 
   const urlFor = (itemId: string) =>
     files.find((f) => f.id === itemId && f.kind === "image")?.url ?? null;
@@ -309,11 +517,9 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
   return (
     <div
       data-testid="photo-sheet"
-      className="relative shrink-0 bg-white touch-none select-none"
+      className="relative shrink-0 cursor-default bg-white touch-none select-none"
       style={{ width: sheetW, height: sheetH }}
-      onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onSelect(null);
-      }}
+      onPointerDown={onSheetPointerDown}
       role="application"
       aria-label={`Lembar foto ${paperWmm}×${paperHmm} mm — ${placements.length} foto`}
     >
@@ -346,7 +552,8 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
       {/* placements */}
       {placements.map((p, i) => {
         const url = urlFor(p.itemId);
-        const selected = p.id === selectedId;
+        const selected = selectedIds.includes(p.id);
+        const isPrimary = p.id === primaryId;
         return (
           <div
             key={p.id}
@@ -355,7 +562,9 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
             onPointerDown={(e) => beginMove(p, e)}
             className={`absolute cursor-move ${
               selected
-                ? "outline outline-1 outline-[#003399]"
+                ? isPrimary
+                  ? "outline outline-1 outline-[#003399]"
+                  : "outline outline-1 outline-dashed outline-[#003399]/60"
                 : "outline outline-1 outline-transparent hover:outline-[#B6BCC6]"
             }`}
             style={{
@@ -392,8 +601,8 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
               />
             ) : null}
 
-            {/* Word-like resize handles */}
-            {selected
+            {/* Word-like resize handles (primary photo only) */}
+            {isPrimary
               ? HANDLE_DIRS.map((dir) => {
                   const isCorner = dir.length === 2;
                   const hx = dir.includes("w") ? 0 : dir.includes("e") ? 100 : 50;
@@ -423,15 +632,31 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
                 })
               : null}
 
-            {/* live dimension badge */}
-            {selected ? (
+            {/* live dimension badge (primary photo only) */}
+            {isPrimary ? (
               <div className="pointer-events-none absolute left-1/2 top-full z-10 mt-1 -translate-x-1/2 whitespace-nowrap rounded border border-[#E5E7EB] bg-white px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-[#374151] shadow-[0_1px_2px_rgba(17,24,39,0.06)]">
-                {Math.round(p.wMm * 10) / 10} × {Math.round(p.hMm * 10) / 10} mm
+                {selectedIds.length > 1
+                  ? `${selectedIds.length} foto • geser bersama`
+                  : `${Math.round(p.wMm * 10) / 10} × ${Math.round(p.hMm * 10) / 10} mm`}
               </div>
             ) : null}
           </div>
         );
       })}
+
+      {/* marquee lasso rectangle */}
+      {marquee ? (
+        <div
+          className="pointer-events-none absolute z-20 border border-dashed border-[#003399]/70 bg-[#003399]/5"
+          style={{
+            left: marquee.x * k,
+            top: marquee.y * k,
+            width: marquee.w * k,
+            height: marquee.h * k,
+          }}
+          aria-hidden="true"
+        />
+      ) : null}
 
       {/* smart snap guides */}
       {guides.v !== null ? (

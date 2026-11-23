@@ -335,7 +335,8 @@ export function usePrintStation() {
   const [settings, setSettings] = useState<PrintSettings>(DEFAULT_SETTINGS);
   const [photoMode, setPhotoModeState] = useState(false);
   const [photoPlacements, setPhotoPlacements] = useState<PhotoPlacement[]>([]);
-  const [photoSelectedId, setPhotoSelectedId] = useState<string | null>(null);
+  /** Word-like multi-selection — order matters: last id is the primary. */
+  const [photoSelectedIds, setPhotoSelectedIds] = useState<string[]>([]);
   const [photoSettings, setPhotoSettings] = useState<PhotoSettings>(DEFAULT_PHOTO_SETTINGS);
   const [page, setPage] = useState(1);
   const [zoom, setZoom] = useState<"fit" | "100">("fit");
@@ -361,7 +362,10 @@ export function usePrintStation() {
   photoModeRef.current = photoMode;
   const photoPlacementsRef = useRef(photoPlacements);
   photoPlacementsRef.current = photoPlacements;
-  const photoSelectedIdRef = useRef(photoSelectedId);
+  const photoSelectedId = photoSelectedIds[photoSelectedIds.length - 1] ?? null;
+  const photoSelectedIdsRef = useRef(photoSelectedIds);
+  photoSelectedIdsRef.current = photoSelectedIds;
+  const photoSelectedIdRef = useRef<string | null>(photoSelectedId);
   photoSelectedIdRef.current = photoSelectedId;
   const photoSettingsRef = useRef(photoSettings);
   photoSettingsRef.current = photoSettings;
@@ -601,8 +605,8 @@ export function usePrintStation() {
         (p) => p.itemId !== id,
       );
       setPhotoPlacements(nextPlacements);
-      setPhotoSelectedId((cur) =>
-        cur && nextPlacements.some((p) => p.id === cur) ? cur : null,
+      setPhotoSelectedIds((cur) =>
+        cur.filter((id) => nextPlacements.some((p) => p.id === id)),
       );
       if (id === activeId) {
         const fallback = next.find((f) => f.status === "ready") ?? next[0] ?? null;
@@ -637,11 +641,37 @@ export function usePrintStation() {
       );
       for (const img of images) intakeImageRef.current(img.id);
     }
-    if (!next) setPhotoSelectedId(null);
+    if (!next) setPhotoSelectedIds([]);
   }, []);
 
-  const selectPhotoPlacement = useCallback((id: string | null) => {
-    setPhotoSelectedId(id);
+  /** Select one photo. With `additive` (Ctrl/Shift/tap-mode) it toggles the
+   * photo in/out of the multi-selection instead of replacing it. */
+  const selectPhotoPlacement = useCallback(
+    (id: string | null, additive?: boolean) => {
+      setPhotoSelectedIds((cur) => {
+        if (!id) return [];
+        if (additive) {
+          return cur.includes(id)
+            ? cur.filter((x) => x !== id)
+            : [...cur, id];
+        }
+        return cur.length === 1 && cur[0] === id ? cur : [id];
+      });
+    },
+    [],
+  );
+
+  /** Replace the whole selection (marquee-lasso result). */
+  const selectPhotoPlacements = useCallback((ids: string[]) => {
+    setPhotoSelectedIds(ids);
+  }, []);
+
+  const selectAllPhotoPlacements = useCallback(() => {
+    setPhotoSelectedIds(photoPlacementsRef.current.map((p) => p.id));
+  }, []);
+
+  const clearPhotoSelection = useCallback(() => {
+    setPhotoSelectedIds([]);
   }, []);
 
   const setPhotoSetting = useCallback((patch: Partial<PhotoSettings>) => {
@@ -694,7 +724,7 @@ export function usePrintStation() {
       };
       return [...list, clampPlacement(placement, paperW, paperH)];
     });
-    setPhotoSelectedId(id);
+    setPhotoSelectedIds([id]);
   }, []);
 
   /** Add every ready, not-yet-placed image to the sheet. */
@@ -710,15 +740,21 @@ export function usePrintStation() {
     });
   }, []);
 
-  const updatePhotoPlacement = useCallback(
-    (id: string, patch: Partial<PhotoPlacement>) => {
-      // Hand edit (drag / resize / nudge / align) — pauses auto re-tiling so
-      // a manual layout is never reshuffled by the next upload.
+  /**
+   * Batch geometry edit — group drag / group nudge / align / single resize.
+   * Hand edit pauses auto re-tiling so a manual layout is never reshuffled by
+   * the next upload.
+   */
+  const updatePhotoPlacements = useCallback(
+    (updates: Array<{ id: string; patch: Partial<PhotoPlacement> }>) => {
+      if (updates.length === 0) return;
       layoutTouchedRef.current = true;
       const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+      const patches = new Map(updates.map((u) => [u.id, u.patch]));
       setPhotoPlacements((list) =>
         list.map((p) => {
-          if (p.id !== id) return p;
+          const patch = patches.get(p.id);
+          if (!patch) return p;
           const next = { ...p, ...patch };
           next.wMm = Math.min(Math.max(next.wMm, MIN_PHOTO_MM), paperW);
           next.hMm = Math.min(Math.max(next.hMm, MIN_PHOTO_MM), paperH);
@@ -730,35 +766,61 @@ export function usePrintStation() {
     [],
   );
 
-  const removePhotoPlacement = useCallback((id: string) => {
+  const updatePhotoPlacement = useCallback(
+    (id: string, patch: Partial<PhotoPlacement>) => {
+      updatePhotoPlacements([{ id, patch }]);
+    },
+    [updatePhotoPlacements],
+  );
+
+  const removePhotoPlacements = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
     layoutTouchedRef.current = true;
-    setPhotoPlacements((list) => list.filter((p) => p.id !== id));
-    setPhotoSelectedId((cur) => (cur === id ? null : cur));
+    const doomed = new Set(ids);
+    setPhotoPlacements((list) => list.filter((p) => !doomed.has(p.id)));
+    setPhotoSelectedIds((cur) => cur.filter((id) => !doomed.has(id)));
   }, []);
 
-  const duplicatePhotoPlacement = useCallback((id: string) => {
-    layoutTouchedRef.current = true;
+  const removePhotoPlacement = useCallback(
+    (id: string) => removePhotoPlacements([id]),
+    [removePhotoPlacements],
+  );
+
+  /** Duplicate every selected photo (group offset 3 mm, Word-like). */
+  const duplicatePhotoPlacements = useCallback((ids: string[]) => {
     const list = photoPlacementsRef.current;
-    if (list.length >= MAX_PLACEMENTS) return;
-    const src = list.find((p) => p.id === id);
-    if (!src) return;
-    const copy: PhotoPlacement = {
-      ...src,
-      id: newPhotoId(),
-      xMm: src.xMm + 3,
-      yMm: src.yMm + 3,
-    };
-    const idx = list.findIndex((p) => p.id === id);
-    const next = [...list];
-    next.splice(idx + 1, 0, clampPlacement(copy, paperDimsRef.current.wMm, paperDimsRef.current.hMm));
-    setPhotoPlacements(next);
-    setPhotoSelectedId(copy.id);
+    if (list.length === 0 || ids.length === 0) return;
+    const wanted = new Set(ids);
+    const src = list.filter((p) => wanted.has(p.id));
+    if (src.length === 0) return;
+    if (list.length + src.length > MAX_PLACEMENTS) {
+      toast.error("Lembar penuh — tidak bisa menduplikasi lagi.", {
+        description: `Maksimal ${MAX_PLACEMENTS} foto per lembar.`,
+      });
+      return;
+    }
+    layoutTouchedRef.current = true;
+    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+    const copies = src.map((p) =>
+      clampPlacement(
+        { ...p, id: newPhotoId(), xMm: p.xMm + 3, yMm: p.yMm + 3 },
+        paperW,
+        paperH,
+      ),
+    );
+    setPhotoPlacements((cur) => [...cur, ...copies]);
+    setPhotoSelectedIds(copies.map((c) => c.id));
   }, []);
+
+  const duplicatePhotoPlacement = useCallback(
+    (id: string) => duplicatePhotoPlacements([id]),
+    [duplicatePhotoPlacements],
+  );
 
   const clearPhotoPlacements = useCallback(() => {
     layoutTouchedRef.current = false;
     setPhotoPlacements([]);
-    setPhotoSelectedId(null);
+    setPhotoSelectedIds([]);
   }, []);
 
   /**
@@ -910,7 +972,7 @@ export function usePrintStation() {
         }
       }
       setPhotoPlacements(out);
-      setPhotoSelectedId(null);
+      setPhotoSelectedIds([]);
       layoutTouchedRef.current = false;
       if (sources.length > total) {
         toast.info(
@@ -1091,7 +1153,7 @@ export function usePrintStation() {
       }
     }
     setPhotoPlacements(out.map((pl) => clampPlacement(pl, paperW, paperH)));
-    setPhotoSelectedId(null);
+    setPhotoSelectedIds([]);
     toast.success(`Lembar terisi — ${cols} × ${rows} foto (${out.length} salinan).`);
   }, []);
 
@@ -1126,28 +1188,50 @@ export function usePrintStation() {
     setPhotoPlacements(out.map((pl) => clampPlacement(pl, paperW, paperH)));
   }, []);
 
-  /** Align the selected placement within the printable area (Word-like). */
-  const alignPhotoPlacement = useCallback((dir: PhotoAlign) => {
-    const list = photoPlacementsRef.current;
-    const selId = photoSelectedIdRef.current;
-    const p = list.find((x) => x.id === selId);
-    if (!p) return;
-    const ps = photoSettingsRef.current;
-    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
-    const bb = placementBBox(p);
-    let cx = p.xMm + p.wMm / 2;
-    let cy = p.yMm + p.hMm / 2;
-    if (dir === "left") cx = ps.marginMm + bb.w / 2;
-    if (dir === "centerX") cx = paperW / 2;
-    if (dir === "right") cx = paperW - ps.marginMm - bb.w / 2;
-    if (dir === "top") cy = ps.marginMm + bb.h / 2;
-    if (dir === "centerY") cy = paperH / 2;
-    if (dir === "bottom") cy = paperH - ps.marginMm - bb.h / 2;
-    updatePhotoPlacement(p.id, {
-      xMm: cx - p.wMm / 2,
-      yMm: cy - p.hMm / 2,
-    });
-  }, [updatePhotoPlacement]);
+  /**
+   * Align within the printable area (Word-like). With several photos
+   * selected, the WHOLE GROUP moves as one block (group bounding box aligned
+   * to the printable margin) — relative positions inside the group keep.
+   */
+  const alignPhotoPlacement = useCallback(
+    (dir: PhotoAlign) => {
+      const list = photoPlacementsRef.current;
+      const selIds = photoSelectedIdsRef.current;
+      const target =
+        selIds.length > 1
+          ? list.filter((p) => selIds.includes(p.id))
+          : list.filter((p) => p.id === photoSelectedIdRef.current);
+      if (target.length === 0) return;
+      const ps = photoSettingsRef.current;
+      const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const p of target) {
+        const bb = placementBBox(p);
+        minX = Math.min(minX, bb.x);
+        minY = Math.min(minY, bb.y);
+        maxX = Math.max(maxX, bb.x + bb.w);
+        maxY = Math.max(maxY, bb.y + bb.h);
+      }
+      let dx = 0;
+      let dy = 0;
+      if (dir === "left") dx = ps.marginMm - minX;
+      if (dir === "centerX") dx = (paperW - (maxX - minX)) / 2 - minX;
+      if (dir === "right") dx = paperW - ps.marginMm - maxX;
+      if (dir === "top") dy = ps.marginMm - minY;
+      if (dir === "centerY") dy = (paperH - (maxY - minY)) / 2 - minY;
+      if (dir === "bottom") dy = paperH - ps.marginMm - maxY;
+      updatePhotoPlacements(
+        target.map((p) => ({
+          id: p.id,
+          patch: { xMm: p.xMm + dx, yMm: p.yMm + dy },
+        })),
+      );
+    },
+    [updatePhotoPlacements],
+  );
 
   // -- photo print execution ---------------------------------------------------
   const printPhotoLayout = useCallback(async () => {
@@ -1455,6 +1539,7 @@ export function usePrintStation() {
     photoMode,
     photoPlacements,
     photoSelectedId,
+    photoSelectedIds,
     photoSettings,
     photoPreset,
     photoSelected,
@@ -1480,9 +1565,15 @@ export function usePrintStation() {
     setPhotoBorderless,
     applyPhotoPreset,
     selectPhotoPlacement,
+    selectPhotoPlacements,
+    selectAllPhotoPlacements,
+    clearPhotoSelection,
     updatePhotoPlacement,
+    updatePhotoPlacements,
     removePhotoPlacement,
+    removePhotoPlacements,
     duplicatePhotoPlacement,
+    duplicatePhotoPlacements,
     clearPhotoPlacements,
     fillPhotoSheet,
     arrangePhotoCopies,

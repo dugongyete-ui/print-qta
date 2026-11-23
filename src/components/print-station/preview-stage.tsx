@@ -32,17 +32,22 @@ const MARGIN_GUIDE_MM = 5; // typical Epson minimum printable margin
 
 interface PhotoStageData {
   placements: PhotoPlacement[];
-  selectedId: string | null;
+  /** All selected ids — last one is the primary. */
+  selectedIds: string[];
   marginMm: number;
   lockAspect: boolean;
   cutLines: boolean;
   presetShort: string;
   grayscale: boolean;
   adjust: PhotoAdjustments;
-  onSelect: (id: string | null) => void;
-  onUpdate: (id: string, patch: Partial<PhotoPlacement>) => void;
-  onRemove: (id: string) => void;
-  onDuplicate: (id: string) => void;
+  onSelect: (id: string | null, additive?: boolean) => void;
+  onSelectIds: (ids: string[]) => void;
+  onSelectAll: () => void;
+  onUpdateMany: (
+    updates: Array<{ id: string; patch: Partial<PhotoPlacement> }>,
+  ) => void;
+  onRemove: (ids: string[]) => void;
+  onDuplicate: (ids: string[]) => void;
 }
 
 interface PreviewStageProps {
@@ -155,6 +160,8 @@ export function PreviewStage(props: PreviewStageProps) {
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [dragging, setDragging] = useState(false);
   const [docxRender, setDocxRender] = useState<DocxRender | null>(null);
+  /** Touch-friendly multi-select mode: tap photos one by one to add. */
+  const [photoMulti, setPhotoMulti] = useState(false);
 
   // -- stage calibration: px per mm ------------------------------------------
   useEffect(() => {
@@ -318,6 +325,8 @@ export function PreviewStage(props: PreviewStageProps) {
 
   const photo = props.photo;
   const photoMode = photo !== null;
+  // Tap-to-add only applies while the photo editor is mounted.
+  const multiActive = photoMode && photoMulti;
 
   const zoomControl = (
     <div className="flex items-center rounded-[5px] bg-[#F3F4F6] p-0.5">
@@ -362,7 +371,7 @@ export function PreviewStage(props: PreviewStageProps) {
 
       {/* Source-size meta row (badge lives here, never overlaps the queue) */}
       {photoMode && photo ? (
-        <div className="flex h-9 shrink-0 items-center justify-center px-4">
+        <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-center gap-x-2 gap-y-1 px-4 py-1">
           <div
             className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border border-[#E5E7EB] bg-white px-3 font-mono text-[10.5px] tabular-nums text-[#6B7280]"
             role="status"
@@ -370,6 +379,49 @@ export function PreviewStage(props: PreviewStageProps) {
             <ImageIcon size={11} strokeWidth={1.5} aria-hidden="true" />
             Mode Foto • {photo.placements.length} foto • {photo.presetShort} • margin {photo.marginMm} mm
           </div>
+          {photo.placements.length > 0 ? (
+            <div className="flex h-8 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white p-0.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)]">
+              {photo.selectedIds.length > 0 ? (
+                <span
+                  className="whitespace-nowrap px-1.5 font-mono text-[10px] font-medium tabular-nums text-[#003399]"
+                  aria-live="polite"
+                >
+                  {photo.selectedIds.length} dipilih
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={photo.onSelectAll}
+                disabled={photo.selectedIds.length === photo.placements.length}
+                title="Pilih semua foto — geser sekali untuk memindah semuanya"
+                className="h-7 whitespace-nowrap rounded px-2 text-[10.5px] font-medium text-[#374151] transition-colors hover:bg-[#F3F4F6] disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                Pilih Semua
+              </button>
+              <button
+                type="button"
+                onClick={() => photo.onSelect(null)}
+                disabled={photo.selectedIds.length === 0}
+                title="Kosongkan pilihan"
+                className="h-7 whitespace-nowrap rounded px-2 text-[10.5px] font-medium text-[#374151] transition-colors hover:bg-[#F3F4F6] disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                Kosongkan
+              </button>
+              <button
+                type="button"
+                aria-pressed={photoMulti}
+                onClick={() => setPhotoMulti((v) => !v)}
+                title="Mode pilih banyak (layar sentuh): ketuk foto satu per satu untuk menambah ke pilihan"
+                className={`h-7 whitespace-nowrap rounded px-2 text-[10.5px] font-semibold transition-colors ${
+                  photoMulti
+                    ? "bg-[#003399] text-white"
+                    : "text-[#003399] hover:bg-[#003399]/5"
+                }`}
+              >
+                Pilih Banyak
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : file && file.status === "ready" ? (
         <div className="flex h-9 shrink-0 items-center justify-center px-4">
@@ -400,14 +452,17 @@ export function PreviewStage(props: PreviewStageProps) {
                   k={k}
                   placements={photo.placements}
                   files={props.files}
-                  selectedId={photo.selectedId}
+                  selectedIds={photo.selectedIds}
                   marginMm={photo.marginMm}
                   lockAspect={photo.lockAspect}
                   cutLines={photo.cutLines}
                   grayscale={photo.grayscale}
                   adjust={photo.adjust}
+                  multiMode={multiActive}
                   onSelect={photo.onSelect}
-                  onUpdate={photo.onUpdate}
+                  onSelectIds={photo.onSelectIds}
+                  onSelectAll={photo.onSelectAll}
+                  onUpdateMany={photo.onUpdateMany}
                   onRemove={photo.onRemove}
                   onDuplicate={photo.onDuplicate}
                 />

@@ -71,6 +71,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 export interface PhotoPanelData {
   placements: PhotoPlacement[];
   selected: PhotoPlacement | null;
+  /** All selected ids — actions apply to the whole group. */
+  selectedIds: string[];
   files: LoadedFile[];
   settings: PhotoSettings;
   preset: PhotoPreset;
@@ -98,9 +100,11 @@ export interface PhotoPanelData {
     },
   ) => void;
   onArrange: () => void;
-  onDuplicate: () => void;
-  onRemove: () => void;
-  onSelect: (id: string | null) => void;
+  onDuplicate: (ids: string[]) => void;
+  onRemove: (ids: string[]) => void;
+  onSelect: (id: string | null, additive?: boolean) => void;
+  onSelectAll: () => void;
+  onClearSelection: () => void;
   onClear: () => void;
   onAddImages: () => void;
 }
@@ -325,6 +329,7 @@ function SidebarContent({
             <PhotoInspector
               placements={photo.placements}
               selected={photo.selected}
+              selectedIds={photo.selectedIds}
               files={photo.files}
               settings={photo.settings}
               preset={photo.preset}
@@ -343,6 +348,8 @@ function SidebarContent({
               onDuplicate={photo.onDuplicate}
               onRemove={photo.onRemove}
               onSelect={photo.onSelect}
+              onSelectAll={photo.onSelectAll}
+              onClearSelection={photo.onClearSelection}
               onClear={photo.onClear}
               onAddImages={photo.onAddImages}
             />

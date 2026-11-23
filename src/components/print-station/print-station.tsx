@@ -78,7 +78,7 @@ export function PrintStation() {
             store.photoMode
               ? {
                   placements: store.photoPlacements,
-                  selectedId: store.photoSelectedId,
+                  selectedIds: store.photoSelectedIds,
                   marginMm: store.photoSettings.marginMm,
                   lockAspect: store.photoSettings.lockAspect,
                   cutLines: store.photoSettings.cutLines,
@@ -86,9 +86,11 @@ export function PrintStation() {
                   grayscale: store.settings.colorMode === "grayscale",
                   adjust: store.photoSettings.adjust,
                   onSelect: store.selectPhotoPlacement,
-                  onUpdate: store.updatePhotoPlacement,
-                  onRemove: store.removePhotoPlacement,
-                  onDuplicate: store.duplicatePhotoPlacement,
+                  onSelectIds: store.selectPhotoPlacements,
+                  onSelectAll: store.selectAllPhotoPlacements,
+                  onUpdateMany: store.updatePhotoPlacements,
+                  onRemove: store.removePhotoPlacements,
+                  onDuplicate: store.duplicatePhotoPlacements,
                 }
               : null
           }
@@ -121,6 +123,7 @@ export function PrintStation() {
           photo={{
             placements: store.photoPlacements,
             selected: store.photoSelected,
+            selectedIds: store.photoSelectedIds,
             files: store.files,
             settings: store.photoSettings,
             preset: store.photoPreset,
@@ -140,17 +143,11 @@ export function PrintStation() {
             onFillSheet: store.fillPhotoSheet,
             onArrangeCount: store.arrangePhotoCopies,
             onArrange: store.autoArrangePhotos,
-            onDuplicate: () => {
-              if (store.photoSelected) {
-                store.duplicatePhotoPlacement(store.photoSelected.id);
-              }
-            },
-            onRemove: () => {
-              if (store.photoSelected) {
-                store.removePhotoPlacement(store.photoSelected.id);
-              }
-            },
+            onDuplicate: store.duplicatePhotoPlacements,
+            onRemove: store.removePhotoPlacements,
             onSelect: store.selectPhotoPlacement,
+            onSelectAll: store.selectAllPhotoPlacements,
+            onClearSelection: store.clearPhotoSelection,
             onClear: store.clearPhotoPlacements,
             onAddImages: store.addAllImagesToSheet,
           }}

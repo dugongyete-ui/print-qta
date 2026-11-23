@@ -206,6 +206,8 @@ function SliderRow({
 interface PhotoInspectorProps {
   placements: PhotoPlacement[];
   selected: PhotoPlacement | null;
+  /** All selected ids — actions apply to the whole group. */
+  selectedIds: string[];
   files: LoadedFile[];
   settings: PhotoSettings;
   preset: PhotoPreset;
@@ -233,9 +235,11 @@ interface PhotoInspectorProps {
     },
   ) => void;
   onArrange: () => void;
-  onDuplicate: () => void;
-  onRemove: () => void;
-  onSelect: (id: string | null) => void;
+  onDuplicate: (ids: string[]) => void;
+  onRemove: (ids: string[]) => void;
+  onSelect: (id: string | null, additive?: boolean) => void;
+  onSelectAll: () => void;
+  onClearSelection: () => void;
   onClear: () => void;
   onAddImages: () => void;
 }
@@ -247,6 +251,7 @@ const COUNT_QUICK: number[] = [2, 3, 4, 6, 8, 9, 12];
 export function PhotoInspector({
   placements,
   selected,
+  selectedIds,
   files,
   settings,
   preset,
@@ -265,9 +270,12 @@ export function PhotoInspector({
   onDuplicate,
   onRemove,
   onSelect,
+  onSelectAll,
+  onClearSelection,
   onClear,
   onAddImages,
 }: PhotoInspectorProps) {
+  const selectedCount = selectedIds.length;
   // "Jumlah Foto" lives in the shared photo settings so this control, photo
   // uploads and preset changes all drive the same auto-grid count.
   const capSafe = Math.max(1, Math.min(capacity, 200));
@@ -393,7 +401,11 @@ export function PhotoInspector({
 
       {/* Posisi & Ukuran (Word-like) */}
       <Section
-        title="Posisi & Ukuran Foto"
+        title={
+          selectedCount > 1
+            ? `Posisi & Ukuran — ${selectedCount} Foto Dipilih`
+            : "Posisi & Ukuran Foto"
+        }
         className={selected ? "" : "opacity-60"}
       >
         {selected ? (
@@ -525,26 +537,36 @@ export function PhotoInspector({
                 <AlignEndHorizontal size={13} strokeWidth={1.5} />
               </IconBtn>
             </div>
+            {selectedCount > 1 ? (
+              <p className="font-mono text-[9.5px] leading-relaxed text-[#003399]">
+                {selectedCount} foto terpilih — tombol rata menggerakkan seluruh
+                grup sebagai satu blok, posisi antar foto tetap.
+              </p>
+            ) : null}
             <div className="grid grid-cols-2 gap-1">
               <button
                 type="button"
-                onClick={onDuplicate}
-                className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                onClick={() => onDuplicate(selectedIds)}
+                disabled={selectedCount === 0}
+                className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
               >
                 <Copy size={12} strokeWidth={1.5} />
-                Duplikat
+                Duplikat{selectedCount > 1 ? ` (${selectedCount})` : ""}
               </button>
               <button
                 type="button"
-                onClick={onRemove}
-                className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                onClick={() => onRemove(selectedIds)}
+                disabled={selectedCount === 0}
+                className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
               >
                 <Trash2 size={12} strokeWidth={1.5} />
-                Hapus
+                Hapus{selectedCount > 1 ? ` (${selectedCount})` : ""}
               </button>
             </div>
             <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
-              Geser langsung di lembar • panah = 1 mm • Shift+panah = 10 mm
+              Geser langsung di lembar • Ctrl/Shift+klik = pilih banyak • tarik
+              di area kosong = seleksi kotak • panah = geser semua terpilih (1
+              mm • Shift+panah = 10 mm) • Ctrl+A = pilih semua
             </p>
           </>
         ) : (
@@ -793,56 +815,86 @@ export function PhotoInspector({
       <Section title={`Foto di Lembar (${placements.length})`}>
         {placements.length === 0 ? (
           <p className="text-[12px] leading-relaxed text-[#6B7280]">
-            Belum ada foto. Unggah PNG/JPG lewat area unggah, lalu foto langsung
+            Belum ada foto. Unggah PNG/JPG lewat area ungah, lalu foto langsung
             diletakkan di lembar.
           </p>
         ) : (
-          <div className="ps-scroll flex max-h-56 flex-col gap-1 overflow-y-auto">
-            {placements.map((p, i) => {
-              const item = files.find((f) => f.id === p.itemId);
-              const active = p.id === selected?.id;
-              return (
-                <div
-                  key={p.id}
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={active}
-                  aria-label={`Pilih foto ${i + 1}`}
-                  onClick={() => onSelect(p.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onSelect(p.id);
-                    }
-                  }}
-                  className={`group flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 transition-colors ${
-                    active
-                      ? "border-[#003399] bg-[#003399]/5"
-                      : "border-transparent hover:border-[#E5E7EB] hover:bg-[#F9FAFB]"
-                  }`}
+          <>
+            {placements.length > 1 ? (
+              <div className="flex items-center gap-3 font-mono text-[10px]">
+                <button
+                  type="button"
+                  onClick={onSelectAll}
+                  disabled={selectedCount === placements.length}
+                  className="text-[#003399] underline decoration-[#003399]/30 underline-offset-2 transition-colors hover:decoration-[#003399] disabled:opacity-30"
                 >
-                  {item?.url ? (
-                    <img
-                      src={item.url}
-                      alt=""
-                      className="h-9 w-9 shrink-0 rounded-[2px] border border-[#E5E7EB] object-cover"
-                    />
-                  ) : (
-                    <div className="h-9 w-9 shrink-0 rounded-[2px] border border-[#E5E7EB] bg-[#F3F4F6]" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[11.5px] font-medium text-[#111827]">
-                      {item?.name ?? "—"}
-                    </p>
-                    <p className="font-mono text-[9.5px] tabular-nums text-[#6B7280]">
-                      #{i + 1} • {Math.round(p.wMm)} × {Math.round(p.hMm)} mm
-                      {item ? ` • ${formatBytes(item.sizeBytes)}` : ""}
-                    </p>
+                  pilih semua
+                </button>
+                <button
+                  type="button"
+                  onClick={onClearSelection}
+                  disabled={selectedCount === 0}
+                  className="text-[#6B7280] underline decoration-[#E5E7EB] underline-offset-2 transition-colors hover:text-[#374151] disabled:opacity-30"
+                >
+                  kosongkan pilihan
+                </button>
+              </div>
+            ) : null}
+            <div className="ps-scroll flex max-h-56 flex-col gap-1 overflow-y-auto">
+              {placements.map((p, i) => {
+                const item = files.find((f) => f.id === p.itemId);
+                const active = selectedIds.includes(p.id);
+                return (
+                  <div
+                    key={p.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={active}
+                    aria-label={`Pilih foto ${i + 1}`}
+                    onClick={(e) =>
+                      onSelect(p.id, e.shiftKey || e.ctrlKey || e.metaKey)
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onSelect(p.id);
+                      }
+                    }}
+                    className={`group flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 transition-colors ${
+                      active
+                        ? "border-[#003399] bg-[#003399]/5"
+                        : "border-transparent hover:border-[#E5E7EB] hover:bg-[#F9FAFB]"
+                    }`}
+                  >
+                    {item?.url ? (
+                      <img
+                        src={item.url}
+                        alt=""
+                        className="h-9 w-9 shrink-0 rounded-[2px] border border-[#E5E7EB] object-cover"
+                      />
+                    ) : (
+                      <div className="h-9 w-9 shrink-0 rounded-[2px] border border-[#E5E7EB] bg-[#F3F4F6]" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[11.5px] font-medium text-[#111827]">
+                        {item?.name ?? "—"}
+                      </p>
+                      <p className="font-mono text-[9.5px] tabular-nums text-[#6B7280]">
+                        #{i + 1} • {Math.round(p.wMm)} × {Math.round(p.hMm)} mm
+                        {item ? ` • ${formatBytes(item.sizeBytes)}` : ""}
+                      </p>
+                    </div>
+                    {active ? (
+                      <span
+                        className="h-4 w-4 shrink-0 rounded-full border-2 border-[#003399] bg-[#003399]/20"
+                        aria-hidden="true"
+                      />
+                    ) : null}
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </Section>
     </>
