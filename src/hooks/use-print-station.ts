@@ -741,6 +741,31 @@ export function usePrintStation() {
   }, []);
 
   /**
+   * "Tambah Foto" picker intake — several customers handing over face photos
+   * at once. Only PNG/JPG images are accepted; anything else is skipped with
+   * a hint so the operator understands why nothing appeared. Images flow
+   * through the standard intake path and the grid re-tiles with every
+   * distinct photo on it (coverAll).
+   */
+  const addPhotoFiles = useCallback(
+    (incoming: File[]) => {
+      const images = incoming.filter((f) => {
+        const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
+        return ACCEPTED_EXT[ext]?.kind === "image";
+      });
+      const skipped = incoming.length - images.length;
+      if (skipped > 0) {
+        toast.warning(`${skipped} file dilewati — bukan foto`, {
+          description:
+            "Tambah Foto hanya menerima PNG/JPG. Untuk PDF/DOC gunakan Unggah Dokumen.",
+        });
+      }
+      if (images.length > 0) addFiles(images);
+    },
+    [addFiles],
+  );
+
+  /**
    * Batch geometry edit — group drag / group nudge / align / single resize.
    * Hand edit pauses auto re-tiling so a manual layout is never reshuffled by
    * the next upload.
@@ -839,6 +864,10 @@ export function usePrintStation() {
       options?: {
         dims?: { wMm: number; hMm: number };
         auto?: boolean;
+        /** Grow the slot count so every distinct uploaded photo keeps a slot
+         * (several customers, one collective sheet). Intake-driven arranges
+         * always set this so a newly added face photo is never dropped. */
+        coverAll?: boolean;
         /** Explicit margin override — used when margin changes and re-tile
          * happens in the same tick (borderless toggle), where the settings
          * ref is still stale. */
@@ -898,27 +927,10 @@ export function usePrintStation() {
         }
         return;
       }
-      const total = Math.min(n0, fit.cap, MAX_PLACEMENTS);
-
-      // Balanced grid: fewest wasted slots first, then the most square block,
-      // preferring the wider option on ties (6 → 3×2, 9 → 3×3, 8 → 4×2).
-      let cols = fit.cols;
-      let bestScore = Infinity;
-      for (let c = 1; c <= fit.cols; c++) {
-        const r = Math.ceil(total / c);
-        if (r > fit.rows) continue;
-        const score = (c * r - total) * 1000 + Math.abs(c - r);
-        if (score < bestScore || (score === bestScore && c > cols)) {
-          bestScore = score;
-          cols = c;
-        }
-      }
-      const w = useLandscape ? ph : pw;
-      const h = useLandscape ? pw : ph;
-      const rows = Math.ceil(total / cols);
-
       // Slot sources: the distinct ready images already on the sheet fill
-      // slots round-robin — every uploaded photo stays on the grid.
+      // slots round-robin — every uploaded photo stays on the grid. Sources
+      // resolve first so intake arranges can grow the slot count to cover
+      // every distinct photo (several customers, one collective sheet).
       let sources: string[] = [];
       const seen = new Set<string>();
       for (const p of list) {
@@ -936,6 +948,35 @@ export function usePrintStation() {
         }
       }
       if (sources.length === 0) sources = [list[0].itemId];
+
+      const baseTotal = Math.min(n0, fit.cap, MAX_PLACEMENTS);
+      let total = baseTotal;
+      // Intake-driven arrange ("coverAll"): never drop a customer's photo —
+      // when more distinct photos are on the sheet than slots, the grid grows
+      // to fit all of them (up to sheet capacity).
+      let grown = false;
+      if (options?.coverAll && sources.length > total) {
+        total = Math.min(sources.length, fit.cap, MAX_PLACEMENTS);
+        grown = total > baseTotal;
+      }
+      const overCap = Math.max(0, sources.length - total);
+
+      // Balanced grid: fewest wasted slots first, then the most square block,
+      // preferring the wider option on ties (6 → 3×2, 9 → 3×3, 8 → 4×2).
+      let cols = fit.cols;
+      let bestScore = Infinity;
+      for (let c = 1; c <= fit.cols; c++) {
+        const r = Math.ceil(total / c);
+        if (r > fit.rows) continue;
+        const score = (c * r - total) * 1000 + Math.abs(c - r);
+        if (score < bestScore || (score === bestScore && c > cols)) {
+          bestScore = score;
+          cols = c;
+        }
+      }
+      const w = useLandscape ? ph : pw;
+      const h = useLandscape ? pw : ph;
+      const rows = Math.ceil(total / cols);
 
       const gridH = rows * h + (rows - 1) * gap;
       const gy =
@@ -974,13 +1015,28 @@ export function usePrintStation() {
       setPhotoPlacements(out);
       setPhotoSelectedIds([]);
       layoutTouchedRef.current = false;
-      if (sources.length > total) {
-        toast.info(
-          `${total} foto tersusun dari ${sources.length} foto yang diunggah`,
-          {
-            description: `Naikkan jumlah foto ke ${sources.length} agar semua foto ikut tersusun.`,
-          },
-        );
+      const gridDesc = `${useLandscape ? "Lanskap" : "Potret"} • ${cols} kolom × ${rows} baris • ${
+        alignV === "top" ? "rata atas" : alignV === "bottom" ? "rata bawah" : "di tengah"
+      } • jarak ${gap} mm`;
+      if (overCap > 0) {
+        if (options?.coverAll) {
+          toast.warning(`Lembar penuh — ${overCap} foto tidak muat`, {
+            description: `Hanya ${total} dari ${sources.length} foto bisa disusun ukuran preset ini. Pilih preset lebih kecil atau kertas lebih besar agar semua foto ikut.`,
+          });
+        } else {
+          toast.info(
+            `${total} foto tersusun dari ${sources.length} foto yang diunggah`,
+            {
+              description: `Naikkan jumlah foto ke ${sources.length} agar semua foto ikut tersusun.`,
+            },
+          );
+        }
+        return;
+      }
+      if (grown) {
+        toast.success(`Semua ${sources.length} foto tersusun`, {
+          description: `Jumlah foto dinaikkan otomatis ${n0} → ${total} agar setiap foto berbeda tetap ada. • ${gridDesc}`,
+        });
         return;
       }
       if (n0 > fit.cap) {
@@ -992,9 +1048,7 @@ export function usePrintStation() {
       }
       if (!options?.auto || out.length > 1) {
         toast.success(`${out.length} foto tersusun otomatis`, {
-          description: `${useLandscape ? "Lanskap" : "Potret"} • ${cols} kolom × ${rows} baris • ${
-            alignV === "top" ? "rata atas" : alignV === "bottom" ? "rata bawah" : "di tengah"
-          } • jarak ${gap} mm`,
+          description: `${sources.length > 1 ? `${sources.length} foto berbeda • ` : ""}${gridDesc}`,
         });
       }
     },
@@ -1014,9 +1068,11 @@ export function usePrintStation() {
       intakeTimerRef.current = null;
       if (photoPlacementsRef.current.length === 0) return;
       // Every upload batch re-bundles the whole grid — "dibungkus": picking
-      // the count is the only decision, tiling is always automatic.
+      // the count is the only decision, tiling is always automatic. coverAll
+      // keeps every distinct face photo on the collective sheet.
       arrangePhotoCopies(photoSettingsRef.current.perSheet, {
         auto: true,
+        coverAll: true,
       });
     }, 350);
   }, [arrangePhotoCopies]);
@@ -1580,6 +1636,7 @@ export function usePrintStation() {
     autoArrangePhotos,
     alignPhotoPlacement,
     addAllImagesToSheet,
+    addPhotoFiles,
     // document accessors for renderers
     getPdfDoc: loadPdfDoc,
     getDocxRender: renderDocx,

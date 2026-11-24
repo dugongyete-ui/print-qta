@@ -12,6 +12,7 @@ import {
   ChevronRight,
   FileWarning,
   Image as ImageIcon,
+  ImagePlus,
   Loader2,
   Ruler,
   Trash2,
@@ -69,6 +70,8 @@ interface PreviewStageProps {
   paperShortLabel: string;
   photo: PhotoStageData | null;
   onFiles: (files: File[]) => void;
+  /** "Tambah Foto" picker intake — image-only, batch-friendly. */
+  onAddPhotoFiles: (files: File[]) => void;
   onSamples: () => void;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
@@ -379,6 +382,27 @@ export function PreviewStage(props: PreviewStageProps) {
             <ImageIcon size={11} strokeWidth={1.5} aria-hidden="true" />
             Mode Foto • {photo.placements.length} foto • {photo.presetShort} • margin {photo.marginMm} mm
           </div>
+          {/* Always-visible picker: add more customers' face photos — the
+              grid re-tiles automatically so every distinct photo keeps a slot. */}
+          <label
+            className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2 text-[10.5px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+            title="Tambah foto orang lain — semua foto otomatis dijajarkan dalam satu lembar"
+          >
+            <input
+              type="file"
+              multiple
+              accept="image/png,image/jpeg"
+              className="sr-only"
+              aria-label="Tambah foto ke lembar"
+              onChange={(e) => {
+                const list = Array.from(e.target.files ?? []);
+                if (list.length > 0) props.onAddPhotoFiles(list);
+                e.target.value = "";
+              }}
+            />
+            <ImagePlus size={11} strokeWidth={1.5} aria-hidden="true" />
+            Tambah Foto
+          </label>
           {photo.placements.length > 0 ? (
             <div className="flex h-8 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white p-0.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)]">
               {photo.selectedIds.length > 0 ? (

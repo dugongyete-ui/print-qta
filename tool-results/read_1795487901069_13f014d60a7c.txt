@@ -1,0 +1,716 @@
+     1→"use client";
+     2→
+     3→// Live true-to-paper preview stage.
+     4→// Renders the active document inside a proportionally accurate paper sheet
+     5→// over the #F4F5F7 drafting mat, with grayscale simulation, orientation
+     6→// handling, margin guides, page navigation and zoom controls.
+     7→
+     8→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+     9→import type { PDFDocumentProxy } from "pdfjs-dist";
+    10→import {
+    11→  ChevronLeft,
+    12→  ChevronRight,
+    13→  FileWarning,
+    14→  Image as ImageIcon,
+    15→  Loader2,
+    16→  Ruler,
+    17→  Trash2,
+    18→  TriangleAlert,
+    19→} from "lucide-react";
+    20→import { MM_TO_PX96 } from "@/lib/paper";
+    21→import type {
+    22→  DocxRender,
+    23→  LoadedFile,
+    24→  PhotoAdjustments,
+    25→  PhotoPlacement,
+    26→  ZoomMode,
+    27→} from "@/lib/print-station/types";
+    28→import { FileQueue, UploadDropzone } from "./upload-queue";
+    29→import { PhotoCanvas } from "./photo-canvas";
+    30→
+    31→const MARGIN_GUIDE_MM = 5; // typical Epson minimum printable margin
+    32→
+    33→interface PhotoStageData {
+    34→  placements: PhotoPlacement[];
+    35→  /** All selected ids — last one is the primary. */
+    36→  selectedIds: string[];
+    37→  marginMm: number;
+    38→  lockAspect: boolean;
+    39→  cutLines: boolean;
+    40→  presetShort: string;
+    41→  grayscale: boolean;
+    42→  adjust: PhotoAdjustments;
+    43→  onSelect: (id: string | null, additive?: boolean) => void;
+    44→  onSelectIds: (ids: string[]) => void;
+    45→  onSelectAll: () => void;
+    46→  onUpdateMany: (
+    47→    updates: Array<{ id: string; patch: Partial<PhotoPlacement> }>,
+    48→  ) => void;
+    49→  onRemove: (ids: string[]) => void;
+    50→  onDuplicate: (ids: string[]) => void;
+    51→}
+    52→
+    53→interface PreviewStageProps {
+    54→  file: LoadedFile | null;
+    55→  files: LoadedFile[];
+    56→  activeQueueId: string | null;
+    57→  paperWmm: number;
+    58→  paperHmm: number;
+    59→  scale: number;
+    60→  grayscale: boolean;
+    61→  showMargins: boolean;
+    62→  zoom: ZoomMode;
+    63→  page: number;
+    64→  pageCount: number | null;
+    65→  continuous: boolean;
+    66→  mismatch: boolean;
+    67→  overflow: boolean;
+    68→  scaleMode: "fit" | "original";
+    69→  paperShortLabel: string;
+    70→  photo: PhotoStageData | null;
+    71→  onFiles: (files: File[]) => void;
+    72→  onSamples: () => void;
+    73→  onSelect: (id: string) => void;
+    74→  onRemove: (id: string) => void;
+    75→  onPageChange: (p: number) => void;
+    76→  onZoomChange: (z: ZoomMode) => void;
+    77→  onToggleMargins: () => void;
+    78→  onEstimatePages: (fileId: string, pages: number) => void;
+    79→  getPdfDoc: (f: LoadedFile) => Promise<PDFDocumentProxy>;
+    80→  getDocxRender: (f: LoadedFile) => Promise<DocxRender>;
+    81→  getDocHtml: (f: LoadedFile) => Promise<string>;
+    82→  duplexAssist: { evenPages: number[] } | null;
+    83→  onPrintEven: () => void;
+    84→  onCancelDuplex: () => void;
+    85→}
+    86→
+    87→function AutoFitBadge({
+    88→  mismatch,
+    89→  overflow,
+    90→  docLabel,
+    91→  paperLabel,
+    92→  scaleMode,
+    93→}: {
+    94→  mismatch: boolean;
+    95→  overflow: boolean;
+    96→  docLabel: string;
+    97→  paperLabel: string;
+    98→  scaleMode: "fit" | "original";
+    99→}) {
+   100→  const warn = mismatch || overflow;
+   101→  const text =
+   102→    overflow && !mismatch
+   103→      ? `Asli: ${docLabel} — melebihi ${paperLabel}`
+   104→      : mismatch && scaleMode === "fit"
+   105→        ? `Asli: ${docLabel} → Penyesuaian Otomatis: ${paperLabel}`
+   106→        : mismatch
+   107→          ? `Asli: ${docLabel} — tidak sesuai tray ${paperLabel}`
+   108→          : `Asli: ${docLabel} — Sesuai Tray`;
+   109→  return (
+   110→    <div
+   111→      className={`flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border px-3 font-mono text-[10.5px] tabular-nums ${
+   112→        warn
+   113→          ? "border-[#FDE68A] bg-[#FFFBEB] text-[#92400E]"
+   114→          : "border-[#E5E7EB] bg-white text-[#6B7280]"
+   115→      }`}
+   116→      role="status"
+   117→    >
+   118→      {warn ? <TriangleAlert size={11} strokeWidth={1.5} /> : null}
+   119→      {text}
+   120→    </div>
+   121→  );
+   122→}
+   123→
+   124→export function PreviewStage(props: PreviewStageProps) {
+   125→  const {
+   126→    file,
+   127→    paperWmm,
+   128→    paperHmm,
+   129→    scale,
+   130→    grayscale,
+   131→    showMargins,
+   132→    zoom,
+   133→    page,
+   134→    pageCount,
+   135→    continuous,
+   136→    mismatch,
+   137→    overflow,
+   138→    scaleMode,
+   139→    onFiles,
+   140→    onSamples,
+   141→    onSelect,
+   142→    onRemove,
+   143→    onPageChange,
+   144→    onZoomChange,
+   145→    onToggleMargins,
+   146→    onEstimatePages,
+   147→    getPdfDoc,
+   148→    getDocxRender,
+   149→    getDocHtml,
+   150→    duplexAssist,
+   151→    onPrintEven,
+   152→    onCancelDuplex,
+   153→  } = props;
+   154→
+   155→  const scrollRef = useRef<HTMLDivElement>(null);
+   156→  const canvasRef = useRef<HTMLCanvasElement>(null);
+   157→  const renderTaskRef = useRef<{ cancel: () => void } | null>(null);
+   158→  const docxHostRef = useRef<HTMLDivElement>(null);
+   159→  const flowHostRef = useRef<HTMLDivElement>(null);
+   160→  const [box, setBox] = useState({ w: 0, h: 0 });
+   161→  const [dragging, setDragging] = useState(false);
+   162→  const [docxRender, setDocxRender] = useState<DocxRender | null>(null);
+   163→  /** Touch-friendly multi-select mode: tap photos one by one to add. */
+   164→  const [photoMulti, setPhotoMulti] = useState(false);
+   165→
+   166→  // -- stage calibration: px per mm ------------------------------------------
+   167→  useEffect(() => {
+   168→    const el = scrollRef.current;
+   169→    if (!el) return;
+   170→    const ro = new ResizeObserver((entries) => {
+   171→      const r = entries[0].contentRect;
+   172→      setBox({ w: r.width, h: r.height });
+   173→    });
+   174→    ro.observe(el);
+   175→    return () => ro.disconnect();
+   176→  }, []);
+   177→
+   178→  const k = useMemo(() => {
+   179→    if (zoom === "100") return MM_TO_PX96;
+   180→    if (box.w < 40 || box.h < 40) return 0;
+   181→    const fit = Math.min((box.w - 72) / paperWmm, (box.h - 88) / paperHmm);
+   182→    return Math.max(0.4, Math.min(fit, 7));
+   183→  }, [zoom, box, paperWmm, paperHmm]);
+   184→
+   185→  const sheetW = Math.round(paperWmm * k);
+   186→  const sheetH = Math.round(paperHmm * k);
+   187→
+   188→  // -- content geometry -------------------------------------------------------
+   189→  const docWmm = file?.docWidthMm ?? paperWmm;
+   190→  const docHmm = file?.docHeightMm ?? paperHmm;
+   191→  const contentW = Math.round(docWmm * scale * k);
+   192→  const contentH = Math.round(docHmm * scale * k);
+   193→  const flowWidth = Math.round((paperWmm - 36) * k);
+   194→  const flowPadX = Math.round(18 * k);
+   195→  const flowPadY = Math.round(20 * k);
+   196→  const flowPageH = Math.round((paperHmm - 40) * k);
+   197→
+   198→  // -- PDF rendering ----------------------------------------------------------
+   199→  useEffect(() => {
+   200→    let cancelled = false;
+   201→    if (!file || file.kind !== "pdf" || file.status !== "ready" || k <= 0) return;
+   202→    const render = async () => {
+   203→      try {
+   204→        // Serialize renders on the shared canvas: abort any in-flight paint first.
+   205→        renderTaskRef.current?.cancel();
+   206→        renderTaskRef.current = null;
+   207→        const doc = await getPdfDoc(file);
+   208→        if (cancelled) return;
+   209→        const docPage = await doc.getPage(Math.min(page, doc.numPages));
+   210→        if (cancelled) return;
+   211→        const base = docPage.getViewport({ scale: 1 });
+   212→        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+   213→        const targetW = Math.max(40, contentW * dpr);
+   214→        const capped = Math.min(targetW, 3200);
+   215→        const viewport = docPage.getViewport({ scale: capped / base.width });
+   216→        const canvas = canvasRef.current;
+   217→        if (!canvas) return;
+   218→        canvas.width = Math.max(1, Math.floor(viewport.width));
+   219→        canvas.height = Math.max(1, Math.floor(viewport.height));
+   220→        const ctx = canvas.getContext("2d");
+   221→        if (ctx) {
+   222→          ctx.fillStyle = "#ffffff";
+   223→          ctx.fillRect(0, 0, canvas.width, canvas.height);
+   224→        }
+   225→        canvas.style.width = `${contentW}px`;
+   226→        canvas.style.height = `${contentH}px`;
+   227→        const task = docPage.render({ canvas, viewport });
+   228→        renderTaskRef.current = task;
+   229→        await task.promise;
+   230→        if (renderTaskRef.current === task) renderTaskRef.current = null;
+   231→        docPage.cleanup();
+   232→      } catch {
+   233→        /* aborted (superseded) or decode issue — preview keeps last frame */
+   234→      }
+   235→    };
+   236→    void render();
+   237→    return () => {
+   238→      cancelled = true;
+   239→      renderTaskRef.current?.cancel();
+   240→      renderTaskRef.current = null;
+   241→    };
+   242→  }, [file, file?.id, file?.status, page, contentW, contentH, k, getPdfDoc]);
+   243→
+   244→  // -- DOCX section rendering -------------------------------------------------
+   245→  useEffect(() => {
+   246→    let cancelled = false;
+   247→    if (!file || file.kind !== "docx" || file.status !== "ready" || !file.docWidthMm) return;
+   248→    if (docxHostRef.current && !continuous) docxHostRef.current.innerHTML = "";
+   249→    const render = async () => {
+   250→      try {
+   251→        const r = await getDocxRender(file);
+   252→        if (cancelled) return;
+   253→        setDocxRender(r);
+   254→        const host = docxHostRef.current;
+   255→        if (!host || continuous) return;
+   256→        const idx = Math.min(Math.max(page - 1, 0), r.sectionsHtml.length - 1);
+   257→        host.innerHTML = r.sectionsHtml[idx] ?? "";
+   258→      } catch {
+   259→        /* handled via file.status */
+   260→      }
+   261→    };
+   262→    void render();
+   263→    return () => {
+   264→      cancelled = true;
+   265→    };
+   266→  }, [file, file?.id, file?.status, page, continuous, getDocxRender]);
+   267→
+   268→  // -- Flow HTML (mammoth / .doc conversion) -----------------------------------
+   269→  useEffect(() => {
+   270→    let cancelled = false;
+   271→    if (!file || !(file.kind === "docx" || file.kind === "doc") || file.status !== "ready") return;
+   272→    if (!file.continuous) return;
+   273→    const render = async () => {
+   274→      try {
+   275→        const html = await getDocHtml(file);
+   276→        if (cancelled) return;
+   277→        const host = flowHostRef.current;
+   278→        if (!host) return;
+   279→        host.innerHTML = html;
+   280→        // estimate page count from rendered height
+   281→        requestAnimationFrame(() => {
+   282→          if (cancelled || !host) return;
+   283→          const contentH2 = host.scrollHeight - flowPadY * 2;
+   284→          const pages = Math.max(1, Math.ceil(contentH2 / Math.max(1, flowPageH)));
+   285→          onEstimatePages(file.id, pages);
+   286→        });
+   287→      } catch {
+   288→        /* handled by file.status */
+   289→      }
+   290→    };
+   291→    void render();
+   292→    return () => {
+   293→      cancelled = true;
+   294→    };
+   295→  }, [file, file?.id, file?.status, flowPadY, flowPageH, getDocHtml, onEstimatePages]);
+   296→
+   297→  const hasDocxFrame =
+   298→    !!file && file.kind === "docx" && file.status === "ready" && !file.continuous;
+   299→  const docxScale =
+   300→    hasDocxFrame && docxRender && docxRender.pageWpx > 0 && contentW > 0
+   301→      ? contentW / docxRender.pageWpx
+   302→      : 0;
+   303→
+   304→  const dragHandlers = useMemo(
+   305→    () => ({
+   306→      onDragOver: (e: React.DragEvent) => {
+   307→        e.preventDefault();
+   308→        setDragging(true);
+   309→      },
+   310→      onDragLeave: (e: React.DragEvent) => {
+   311→        e.preventDefault();
+   312→        setDragging(false);
+   313→      },
+   314→      onDrop: (e: React.DragEvent) => {
+   315→        e.preventDefault();
+   316→        setDragging(false);
+   317→        const list = Array.from(e.dataTransfer.files ?? []);
+   318→        if (list.length > 0) onFiles(list);
+   319→      },
+   320→    }),
+   321→    [onFiles],
+   322→  );
+   323→
+   324→  const navDisabled = !file || file.status !== "ready" || !pageCount || pageCount < 2;
+   325→
+   326→  const photo = props.photo;
+   327→  const photoMode = photo !== null;
+   328→  // Tap-to-add only applies while the photo editor is mounted.
+   329→  const multiActive = photoMode && photoMulti;
+   330→
+   331→  const zoomControl = (
+   332→    <div className="flex items-center rounded-[5px] bg-[#F3F4F6] p-0.5">
+   333→      <button
+   334→        type="button"
+   335→        aria-pressed={zoom === "fit"}
+   336→        onClick={() => onZoomChange("fit")}
+   337→        className={`h-6 rounded-[4px] px-2 text-[11px] font-medium transition-colors ${
+   338→          zoom === "fit" ? "bg-white text-[#111827] shadow-sm" : "text-[#6B7280] hover:text-[#111827]"
+   339→        }`}
+   340→      >
+   341→        Fit
+   342→      </button>
+   343→      <button
+   344→        type="button"
+   345→        aria-pressed={zoom === "100"}
+   346→        onClick={() => onZoomChange("100")}
+   347→        className={`h-6 rounded-[4px] px-2 font-mono text-[11px] font-medium tabular-nums transition-colors ${
+   348→          zoom === "100" ? "bg-white text-[#111827] shadow-sm" : "text-[#6B7280] hover:text-[#111827]"
+   349→        }`}
+   350→      >
+   351→        100%
+   352→      </button>
+   353→    </div>
+   354→  );
+   355→
+   356→  const setSafePage = useCallback(
+   357→    (p: number) => {
+   358→      const total = pageCount ?? 1;
+   359→      onPageChange(Math.min(Math.max(1, p), Math.max(1, total)));
+   360→    },
+   361→    [pageCount, onPageChange],
+   362→  );
+   363→
+   364→  return (
+   365→    <section
+   366→      className="relative flex min-w-0 flex-1 flex-col bg-[#F4F5F7]"
+   367→      aria-label="Pratinjau Cetak"
+   368→      {...dragHandlers}
+   369→    >
+   370→      <FileQueue files={props.files ?? []} activeId={props.activeQueueId ?? null} onSelect={onSelect} onRemove={onRemove} />
+   371→
+   372→      {/* Source-size meta row (badge lives here, never overlaps the queue) */}
+   373→      {photoMode && photo ? (
+   374→        <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-center gap-x-2 gap-y-1 px-4 py-1">
+   375→          <div
+   376→            className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border border-[#E5E7EB] bg-white px-3 font-mono text-[10.5px] tabular-nums text-[#6B7280]"
+   377→            role="status"
+   378→          >
+   379→            <ImageIcon size={11} strokeWidth={1.5} aria-hidden="true" />
+   380→            Mode Foto • {photo.placements.length} foto • {photo.presetShort} • margin {photo.marginMm} mm
+   381→          </div>
+   382→          {photo.placements.length > 0 ? (
+   383→            <div className="flex h-8 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white p-0.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)]">
+   384→              {photo.selectedIds.length > 0 ? (
+   385→                <span
+   386→                  className="whitespace-nowrap px-1.5 font-mono text-[10px] font-medium tabular-nums text-[#003399]"
+   387→                  aria-live="polite"
+   388→                >
+   389→                  {photo.selectedIds.length} dipilih
+   390→                </span>
+   391→              ) : null}
+   392→              <button
+   393→                type="button"
+   394→                onClick={photo.onSelectAll}
+   395→                disabled={photo.selectedIds.length === photo.placements.length}
+   396→                title="Pilih semua foto — geser sekali untuk memindah semuanya"
+   397→                className="h-7 whitespace-nowrap rounded px-2 text-[10.5px] font-medium text-[#374151] transition-colors hover:bg-[#F3F4F6] disabled:opacity-30 disabled:hover:bg-transparent"
+   398→              >
+   399→                Pilih Semua
+   400→              </button>
+   401→              <button
+   402→                type="button"
+   403→                onClick={() => photo.onSelect(null)}
+   404→                disabled={photo.selectedIds.length === 0}
+   405→                title="Kosongkan pilihan"
+   406→                className="h-7 whitespace-nowrap rounded px-2 text-[10.5px] font-medium text-[#374151] transition-colors hover:bg-[#F3F4F6] disabled:opacity-30 disabled:hover:bg-transparent"
+   407→              >
+   408→                Kosongkan
+   409→              </button>
+   410→              <button
+   411→                type="button"
+   412→                aria-pressed={photoMulti}
+   413→                onClick={() => setPhotoMulti((v) => !v)}
+   414→                title="Mode pilih banyak (layar sentuh): ketuk foto satu per satu untuk menambah ke pilihan"
+   415→                className={`h-7 whitespace-nowrap rounded px-2 text-[10.5px] font-semibold transition-colors ${
+   416→                  photoMulti
+   417→                    ? "bg-[#003399] text-white"
+   418→                    : "text-[#003399] hover:bg-[#003399]/5"
+   419→                }`}
+   420→              >
+   421→                Pilih Banyak
+   422→              </button>
+   423→            </div>
+   424→          ) : null}
+   425→        </div>
+   426→      ) : file && file.status === "ready" ? (
+   427→        <div className="flex h-9 shrink-0 items-center justify-center px-4">
+   428→          <AutoFitBadge
+   429→            mismatch={mismatch}
+   430→            overflow={overflow}
+   431→            docLabel={file.docLabel ?? "—"}
+   432→            paperLabel={props.paperShortLabel}
+   433→            scaleMode={scaleMode}
+   434→          />
+   435→        </div>
+   436→      ) : null}
+   437→
+   438→      <div ref={scrollRef} className="ps-scroll relative min-h-0 flex-1 overflow-auto">
+   439→        {/* ---- PHOTO MODE: Word-like sheet editor ---- */}
+   440→        {photoMode && photo ? (
+   441→          props.files.length === 0 ? (
+   442→            <UploadDropzone onFiles={onFiles} onSamples={onSamples} dragging={dragging} />
+   443→          ) : (
+   444→            <div className="flex min-h-full w-max min-w-full items-center justify-center p-9 pb-32 lg:pb-16">
+   445→              <div
+   446→                className="relative shrink-0 overflow-hidden rounded-[2px] border border-[#E5E7EB] bg-white shadow-[0_1px_2px_rgba(17,24,39,0.06)]"
+   447→                style={{ width: sheetW, height: sheetH }}
+   448→              >
+   449→                <PhotoCanvas
+   450→                  paperWmm={paperWmm}
+   451→                  paperHmm={paperHmm}
+   452→                  k={k}
+   453→                  placements={photo.placements}
+   454→                  files={props.files}
+   455→                  selectedIds={photo.selectedIds}
+   456→                  marginMm={photo.marginMm}
+   457→                  lockAspect={photo.lockAspect}
+   458→                  cutLines={photo.cutLines}
+   459→                  grayscale={photo.grayscale}
+   460→                  adjust={photo.adjust}
+   461→                  multiMode={multiActive}
+   462→                  onSelect={photo.onSelect}
+   463→                  onSelectIds={photo.onSelectIds}
+   464→                  onSelectAll={photo.onSelectAll}
+   465→                  onUpdateMany={photo.onUpdateMany}
+   466→                  onRemove={photo.onRemove}
+   467→                  onDuplicate={photo.onDuplicate}
+   468→                />
+   469→              </div>
+   470→            </div>
+   471→          )
+   472→        ) : !file ? (
+   473→          <UploadDropzone onFiles={onFiles} onSamples={onSamples} dragging={dragging} />
+   474→        ) : (
+   475→          <div className="flex min-h-full w-max min-w-full items-center justify-center p-9 pb-32 lg:pb-16">
+   476→            {file.status === "error" ? (
+   477→              <div className="flex w-full max-w-[440px] flex-col items-center rounded-lg border border-[#E5E7EB] bg-white px-8 py-10 text-center">
+   478→                <FileWarning size={24} strokeWidth={1.5} className="text-[#6B7280]" />
+   479→                <p className="mt-3 text-[14px] font-semibold text-[#111827]">
+   480→                  Dokumen tidak dapat dibuka
+   481→                </p>
+   482→                <p className="mt-1.5 text-[12.5px] leading-relaxed text-[#6B7280]">
+   483→                  {file.error ?? "Format tidak didukung atau file rusak."}
+   484→                </p>
+   485→                <p className="mt-3 max-w-full truncate rounded border border-[#E5E7EB] bg-[#F9FAFB] px-2 py-1 font-mono text-[10.5px] text-[#6B7280]">
+   486→                  {file.name}
+   487→                </p>
+   488→                <button
+   489→                  type="button"
+   490→                  onClick={() => onRemove(file.id)}
+   491→                  className="mt-5 inline-flex h-8 items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-3 text-[12px] font-medium text-[#374151] hover:bg-[#F9FAFB]"
+   492→                >
+   493→                  <Trash2 size={13} strokeWidth={1.5} />
+   494→                  Hapus dari Daftar
+   495→                </button>
+   496→              </div>
+   497→            ) : file.status === "loading" ? (
+   498→              <div className="flex flex-col items-center gap-3 py-16">
+   499→                <Loader2 size={22} strokeWidth={1.5} className="animate-spin text-[#6B7280]" />
+   500→                <p className="font-mono text-[11px] text-[#6B7280]">
+   501→                  Menganalisis dokumen — {file.name}
+   502→                </p>
+   503→              </div>
+   504→            ) : (
+   505→              /* ---- paper sheet ---- */
+   506→              <div
+   507→                className="relative shrink-0 overflow-hidden rounded-[2px] border border-[#E5E7EB] bg-white shadow-[0_1px_2px_rgba(17,24,39,0.06)]"
+   508→                style={{ width: sheetW, height: sheetH }}
+   509→                role="img"
+   510→                aria-label={`Pratinjau halaman ${page} pada kertas ${paperWmm}×${paperHmm} mm`}
+   511→              >
+   512→                {/* PDF page */}
+   513→                {file.kind === "pdf" ? (
+   514→                  <div
+   515→                    className="absolute flex items-center justify-center"
+   516→                    style={{
+   517→                      left: (sheetW - contentW) / 2,
+   518→                      top: (sheetH - contentH) / 2,
+   519→                      width: contentW,
+   520→                      height: contentH,
+   521→                      overflow: "hidden",
+   522→                    }}
+   523→                  >
+   524→                    <canvas
+   525→                      ref={canvasRef}
+   526→                      className={grayscale ? "grayscale" : undefined}
+   527→                    />
+   528→                  </div>
+   529→                ) : null}
+   530→
+   531→                {/* Image */}
+   532→                {file.kind === "image" && file.url ? (
+   533→                  <div
+   534→                    className="absolute flex items-center justify-center"
+   535→                    style={{
+   536→                      left: (sheetW - contentW) / 2,
+   537→                      top: (sheetH - contentH) / 2,
+   538→                      width: contentW,
+   539→                      height: contentH,
+   540→                      overflow: "hidden",
+   541→                    }}
+   542→                  >
+   543→                    <img
+   544→                      src={file.url}
+   545→                      alt={`Pratinjau ${file.name}`}
+   546→                      style={{ width: contentW, height: contentH }}
+   547→                      className={grayscale ? "grayscale" : undefined}
+   548→                      draggable={false}
+   549→                    />
+   550→                  </div>
+   551→                ) : null}
+   552→
+   553→                {/* DOCX (docx-preview sections) */}
+   554→                {hasDocxFrame ? (
+   555→                  <div
+   556→                    className="absolute overflow-hidden"
+   557→                    style={{
+   558→                      left: (sheetW - contentW) / 2,
+   559→                      top: (sheetH - contentH) / 2,
+   560→                      width: contentW,
+   561→                      height: contentH,
+   562→                    }}
+   563→                  >
+   564→                    <div
+   565→                      ref={docxHostRef}
+   566→                      className={grayscale ? "grayscale" : undefined}
+   567→                      style={{
+   568→                        width: "auto",
+   569→                        transformOrigin: "top left",
+   570→                        transform: docxScale > 0 ? `scale(${docxScale})` : undefined,
+   571→                      }}
+   572→                    />
+   573→                  </div>
+   574→                ) : null}
+   575→
+   576→                {/* Continuous flow HTML */}
+   577→                {file.continuous && file.status === "ready" ? (
+   578→                  <div
+   579→                    className="ps-scroll absolute inset-0 overflow-y-auto"
+   580→                    style={{ width: sheetW }}
+   581→                  >
+   582→                    <div
+   583→                      ref={flowHostRef}
+   584→                      className={`doc-flow ${grayscale ? "grayscale" : undefined}`}
+   585→                      style={{
+   586→                        width: flowWidth,
+   587→                        paddingLeft: flowPadX,
+   588→                        paddingRight: flowPadX,
+   589→                        paddingTop: flowPadY,
+   590→                        paddingBottom: flowPadY,
+   591→                        minHeight: sheetH,
+   592→                      }}
+   593→                    />
+   594→                  </div>
+   595→                ) : null}
+   596→
+   597→                {/* Margin guides */}
+   598→                {showMargins ? (
+   599→                  <div
+   600→                    className="pointer-events-none absolute rounded-[1px] border border-dashed border-[#D1D5DB]"
+   601→                    style={{
+   602→                      left: MARGIN_GUIDE_MM * k,
+   603→                      top: MARGIN_GUIDE_MM * k,
+   604→                      right: MARGIN_GUIDE_MM * k,
+   605→                      bottom: MARGIN_GUIDE_MM * k,
+   606→                    }}
+   607→                    aria-hidden="true"
+   608→                  />
+   609→                ) : null}
+   610→              </div>
+   611→            )}
+   612→          </div>
+   613→        )}
+   614→
+   615→        {/* Drag overlay when a document is already loaded */}
+   616→        {dragging && file ? (
+   617→          <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-[#003399] bg-white/60">
+   618→            <span className="rounded-md border border-[#003399] bg-white px-3 py-1.5 text-[12px] font-medium text-[#003399]">
+   619→              Lepaskan untuk mengunggah
+   620→            </span>
+   621→          </div>
+   622→        ) : null}
+   623→      </div>
+   624→
+   625→      {/* Floating stage controls */}
+   626→      {photoMode ? (
+   627→        <div className="absolute bottom-[84px] left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-1.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)] lg:bottom-4">
+   628→          {zoomControl}
+   629→          <span className="mr-1 whitespace-nowrap px-1 font-mono text-[10px] tabular-nums text-[#9CA3AF]">
+   630→            {props.paperShortLabel} • {Math.round(paperWmm)}×{Math.round(paperHmm)} mm
+   631→          </span>
+   632→        </div>
+   633→      ) : file && file.status !== "error" ? (
+   634→        <div className="absolute bottom-[84px] left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white px-1.5 shadow-[0_1px_2px_rgba(17,24,39,0.05)] lg:bottom-4">
+   635→          <button
+   636→            type="button"
+   637→            aria-label="Halaman sebelumnya"
+   638→            disabled={navDisabled || page <= 1}
+   639→            onClick={() => setSafePage(page - 1)}
+   640→            className="flex h-7 w-7 items-center justify-center rounded text-[#374151] transition-colors hover:bg-[#F3F4F6] disabled:opacity-30 disabled:hover:bg-transparent"
+   641→          >
+   642→            <ChevronLeft size={14} strokeWidth={1.5} />
+   643→          </button>
+   644→          <span className="min-w-[64px] whitespace-nowrap text-center font-mono text-[11px] tabular-nums text-[#111827]">
+   645→            <span className="hidden sm:inline">Halaman </span>
+   646→            {page} / {pageCount ?? 1}
+   647→          </span>
+   648→          <button
+   649→            type="button"
+   650→            aria-label="Halaman berikutnya"
+   651→            disabled={navDisabled || page >= (pageCount ?? 1)}
+   652→            onClick={() => setSafePage(page + 1)}
+   653→            className="flex h-7 w-7 items-center justify-center rounded text-[#374151] transition-colors hover:bg-[#F3F4F6] disabled:opacity-30 disabled:hover:bg-transparent"
+   654→          >
+   655→            <ChevronRight size={14} strokeWidth={1.5} />
+   656→          </button>
+   657→
+   658→          <span className="mx-1 h-5 w-px bg-[#E5E7EB]" aria-hidden="true" />
+   659→
+   660→          {zoomControl}
+   661→
+   662→          <span className="mx-1 h-5 w-px bg-[#E5E7EB]" aria-hidden="true" />
+   663→
+   664→          <button
+   665→            type="button"
+   666→            aria-label="Tampilkan panduan margin"
+   667→            aria-pressed={showMargins}
+   668→            title="Panduan margin (5 mm)"
+   669→            onClick={onToggleMargins}
+   670→            className={`flex h-7 w-7 items-center justify-center rounded transition-colors ${
+   671→              showMargins
+   672→                ? "bg-[#003399]/10 text-[#003399]"
+   673→                : "text-[#374151] hover:bg-[#F3F4F6]"
+   674→            }`}
+   675→          >
+   676→            <Ruler size={14} strokeWidth={1.5} />
+   677→          </button>
+   678→        </div>
+   679→      ) : null}
+   680→
+   681→      {/* Manual duplex assist overlay */}
+   682→      {duplexAssist ? (
+   683→        <div className="absolute inset-0 z-20 grid place-items-center bg-[#F4F5F7]/85">
+   684→          <div className="w-[400px] max-w-[90vw] rounded-lg border border-[#E5E7EB] bg-white p-6">
+   685→            <p className="text-[14px] font-semibold text-[#111827]">Cetak Sisi Genap</p>
+   686→            <p className="mt-2 text-[12.5px] leading-relaxed text-[#6B7280]">
+   687→              Sisi ganjil telah dikirim ke dialog cetak. Ambil tumpukan hasil, balik
+   688→              kertasnya, susun ulang urutannya, lalu masukkan kembali ke tray Epson
+   689→              untuk mencetak sisi genap.
+   690→            </p>
+   691→            <p className="mt-3 rounded border border-[#E5E7EB] bg-[#F9FAFB] px-2.5 py-1.5 font-mono text-[11px] tabular-nums text-[#374151]">
+   692→              Halaman genap (terbalik): {duplexAssist.evenPages.join(", ")}
+   693→            </p>
+   694→            <div className="mt-5 flex items-center justify-end gap-2">
+   695→              <button
+   696→                type="button"
+   697→                onClick={onCancelDuplex}
+   698→                className="h-9 rounded-md border border-[#E5E7EB] bg-white px-3.5 text-[12.5px] font-medium text-[#374151] hover:bg-[#F9FAFB]"
+   699→              >
+   700→                Batalkan
+   701→              </button>
+   702→              <button
+   703→                type="button"
+   704→                onClick={onPrintEven}
+   705→                className="h-9 rounded-md bg-[#003399] px-4 text-[12.5px] font-semibold text-white hover:bg-[#002673]"
+   706→              >
+   707→                Cetak Sisi Genap
+   708→              </button>
+   709→            </div>
+   710→          </div>
+   711→        </div>
+   712→      ) : null}
+   713→    </section>
+   714→  );
+   715→}
+   716→

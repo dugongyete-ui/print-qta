@@ -95,6 +95,7 @@ export function PrintStation() {
               : null
           }
           onFiles={store.addFiles}
+          onAddPhotoFiles={store.addPhotoFiles}
           onSamples={() => void store.loadSamples()}
           onSelect={store.selectFile}
           onRemove={store.removeFile}
@@ -150,6 +151,7 @@ export function PrintStation() {
             onClearSelection: store.clearPhotoSelection,
             onClear: store.clearPhotoPlacements,
             onAddImages: store.addAllImagesToSheet,
+            onAddPhotoFiles: store.addPhotoFiles,
           }}
         />
       </main>

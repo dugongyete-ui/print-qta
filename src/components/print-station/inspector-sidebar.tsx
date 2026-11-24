@@ -107,6 +107,8 @@ export interface PhotoPanelData {
   onClearSelection: () => void;
   onClear: () => void;
   onAddImages: () => void;
+  /** "Tambah Foto" picker intake — image-only, batch-friendly. */
+  onAddPhotoFiles: (files: File[]) => void;
 }
 
 function ColorQualitySection({
@@ -352,6 +354,7 @@ function SidebarContent({
               onClearSelection={photo.onClearSelection}
               onClear={photo.onClear}
               onAddImages={photo.onAddImages}
+              onAddPhotoFiles={photo.onAddPhotoFiles}
             />
             <ColorQualitySection settings={settings} onSetting={onSetting} />
             <Section title="Salinan">

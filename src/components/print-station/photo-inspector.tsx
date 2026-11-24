@@ -242,6 +242,8 @@ interface PhotoInspectorProps {
   onClearSelection: () => void;
   onClear: () => void;
   onAddImages: () => void;
+  /** "Tambah Foto" picker intake — image-only, batch-friendly. */
+  onAddPhotoFiles: (files: File[]) => void;
 }
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
@@ -274,6 +276,7 @@ export function PhotoInspector({
   onClearSelection,
   onClear,
   onAddImages,
+  onAddPhotoFiles,
 }: PhotoInspectorProps) {
   const selectedCount = selectedIds.length;
   // "Jumlah Foto" lives in the shared photo settings so this control, photo
@@ -789,6 +792,28 @@ export function PhotoInspector({
             agar tidak terpotong driver Epson.
           </p>
         ) : null}
+        {/* Add-photo picker: several customers at once — every distinct face
+            photo keeps a slot and the grid re-tiles automatically. */}
+        <label className="flex h-8 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md bg-[#003399] text-[11.5px] font-semibold text-white transition-colors hover:bg-[#002673]">
+          <input
+            type="file"
+            multiple
+            accept="image/png,image/jpeg"
+            className="sr-only"
+            aria-label="Pilih file foto untuk ditambahkan ke lembar"
+            onChange={(e) => {
+              const list = Array.from(e.target.files ?? []);
+              if (list.length > 0) onAddPhotoFiles(list);
+              e.target.value = "";
+            }}
+          />
+          <ImagePlus size={12} strokeWidth={1.5} />
+          Tambah Foto dari File
+        </label>
+        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+          Banyak orang sekaligus? Pilih semua foto wajah — otomatis dijajarkan
+          dalam satu lembar.
+        </p>
         {unplacedImages.length > 0 ? (
           <button
             type="button"
