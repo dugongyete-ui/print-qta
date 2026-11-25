@@ -12,6 +12,7 @@ import {
   AlignStartHorizontal,
   AlignStartVertical,
   Copy,
+  Crop,
   Eraser,
   ImagePlus,
   LayoutGrid,
@@ -247,6 +248,8 @@ interface PhotoInspectorProps {
   onAddPhotoFiles: (files: File[]) => void;
   /** "Ubah Foto" — swap the source image of one slot in place. */
   onChangePhoto: (placementId: string, file: File) => void;
+  /** "Potong Foto" — open the crop dialog for the slot's source image. */
+  onCropPhoto: (placementId: string) => void;
 }
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
@@ -281,6 +284,7 @@ export function PhotoInspector({
   onAddImages,
   onAddPhotoFiles,
   onChangePhoto,
+  onCropPhoto,
 }: PhotoInspectorProps) {
   const selectedCount = selectedIds.length;
   // "Jumlah Foto" lives in the shared photo settings so this control, photo
@@ -428,21 +432,32 @@ export function PhotoInspector({
                   {files.find((f) => f.id === selected.itemId)?.name ?? "—"}
                 </span>
               </div>
-              <label className="flex h-8 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[11.5px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5">
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg"
-                  className="sr-only"
-                  aria-label="Ganti foto terpilih dengan file lain"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) onChangePhoto(selected.id, f);
-                    e.target.value = "";
-                  }}
-                />
-                <Repeat size={12} strokeWidth={1.5} />
-                Ubah Foto Slot Ini
-              </label>
+              <div className="grid grid-cols-2 gap-1.5">
+                <label className="flex h-8 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[11.5px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5">
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg"
+                    className="sr-only"
+                    aria-label="Ganti foto terpilih dengan file lain"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) onChangePhoto(selected.id, f);
+                      e.target.value = "";
+                    }}
+                  />
+                  <Repeat size={12} strokeWidth={1.5} />
+                  Ubah Foto
+                </label>
+                <button
+                  type="button"
+                  onClick={() => onCropPhoto(selected.id)}
+                  title="Potong foto — buang bagian yang tidak perlu (mis. status bar screenshot)"
+                  className="flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white text-[11.5px] font-semibold text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                >
+                  <Crop size={12} strokeWidth={1.5} />
+                  Potong Foto
+                </button>
+              </div>
             </div>
             <div className="flex gap-2">
               <NumField

@@ -9,7 +9,7 @@
 // so the editor, the preview and the print rasterizer stay in agreement.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Copy, ImagePlus, Repeat, RotateCw, Trash2 } from "lucide-react";
+import { Copy, Crop, ImagePlus, Repeat, RotateCw, Trash2 } from "lucide-react";
 import { MIN_PHOTO_MM, type LoadedFile, type PhotoAdjustments, type PhotoPlacement } from "@/lib/print-station/types";
 import { photoAdjustFilterCss } from "@/lib/print-station/engine";
 
@@ -56,6 +56,8 @@ interface PhotoCanvasProps {
   onDuplicate: (ids: string[]) => void;
   /** "Ubah Foto" — swap the source image of this slot in place. */
   onChangePhoto: (placementId: string, file: File) => void;
+  /** "Potong Foto" — open the crop dialog for this slot's source image. */
+  onCropPhoto: (placementId: string) => void;
 }
 
 type Gesture =
@@ -188,6 +190,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     onRemove,
     onDuplicate,
     onChangePhoto,
+    onCropPhoto,
   } = props;
 
   const gestureRef = useRef<Gesture | null>(null);
@@ -640,6 +643,16 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
                   <Repeat size={11} strokeWidth={2} aria-hidden="true" />
                   Ubah Foto
                 </label>
+                <button
+                  type="button"
+                  title="Potong foto — buang bagian yang tidak perlu (mis. status bar screenshot)"
+                  aria-label={`Potong foto ${i + 1}`}
+                  onClick={() => onCropPhoto(p.id)}
+                  className="flex h-7 items-center gap-1 whitespace-nowrap rounded px-2 text-[11px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+                >
+                  <Crop size={11} strokeWidth={2} aria-hidden="true" />
+                  Potong
+                </button>
                 <span className="mx-0.5 h-4 w-px bg-[#E5E7EB]" aria-hidden="true" />
                 <button
                   type="button"

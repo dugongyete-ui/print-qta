@@ -111,6 +111,8 @@ export interface PhotoPanelData {
   onAddPhotoFiles: (files: File[]) => void;
   /** "Ubah Foto" — swap the source image of one slot in place. */
   onChangePhoto: (placementId: string, file: File) => void;
+  /** "Potong Foto" — open the crop dialog for the slot's source image. */
+  onCropPhoto: (placementId: string) => void;
 }
 
 function ColorQualitySection({
@@ -358,6 +360,7 @@ function SidebarContent({
               onAddImages={photo.onAddImages}
               onAddPhotoFiles={photo.onAddPhotoFiles}
               onChangePhoto={photo.onChangePhoto}
+              onCropPhoto={photo.onCropPhoto}
             />
             <ColorQualitySection settings={settings} onSetting={onSetting} />
             <Section title="Salinan">

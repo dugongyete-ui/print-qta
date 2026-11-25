@@ -9,12 +9,15 @@ import { TopBar, type WorkMode } from "./top-bar";
 import { PreviewStage } from "./preview-stage";
 import { InspectorSidebar } from "./inspector-sidebar";
 import { PrintActionBar } from "./print-action-bar";
+import { PhotoCropDialog } from "./photo-crop-dialog";
 
 const emptySubscribe = () => () => {};
 
 export function PrintStation() {
   const store = usePrintStation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  /** Placement id whose source photo is being cropped (dialog target). */
+  const [cropPlacementId, setCropPlacementId] = useState<string | null>(null);
   // The workspace is a pure interactive tool (no SEO content). Rendering an
   // identical shell until hydration completes keeps the SSR tree trivially in
   // sync and eliminates the intermittent Radix Select aria-controls useId
@@ -92,6 +95,7 @@ export function PrintStation() {
                   onRemove: store.removePhotoPlacements,
                   onDuplicate: store.duplicatePhotoPlacements,
                   onChangePhoto: store.replacePhotoItem,
+                  onCropPhoto: setCropPlacementId,
                 }
               : null
           }
@@ -156,6 +160,7 @@ export function PrintStation() {
             onAddImages: store.addAllImagesToSheet,
             onAddPhotoFiles: store.addPhotoFiles,
             onChangePhoto: store.replacePhotoItem,
+            onCropPhoto: setCropPlacementId,
           }}
         />
       </main>
@@ -167,6 +172,27 @@ export function PrintStation() {
         canPrint={store.canPrint}
         printing={store.printing}
         onPrint={() => void store.triggerPrint()}
+      />
+
+      {/* "Potong Foto" — interactive crop dialog for the targeted slot's photo */}
+      <PhotoCropDialog
+        placement={
+          cropPlacementId
+            ? store.photoPlacements.find((p) => p.id === cropPlacementId) ?? null
+            : null
+        }
+        file={
+          cropPlacementId
+            ? (store.files.find(
+                (f) =>
+                  f.id ===
+                  (store.photoPlacements.find((p) => p.id === cropPlacementId)
+                    ?.itemId ?? ""),
+              ) ?? null)
+            : null
+        }
+        onApply={store.cropPhotoItem}
+        onClose={() => setCropPlacementId(null)}
       />
     </div>
   );

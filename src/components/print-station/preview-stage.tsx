@@ -51,6 +51,8 @@ interface PhotoStageData {
   onDuplicate: (ids: string[]) => void;
   /** "Ubah Foto" — swap one slot's source image in place. */
   onChangePhoto: (placementId: string, file: File) => void;
+  /** "Potong Foto" — open the crop dialog for the slot's source image. */
+  onCropPhoto: (placementId: string) => void;
 }
 
 interface PreviewStageProps {
@@ -492,6 +494,7 @@ export function PreviewStage(props: PreviewStageProps) {
                   onRemove={photo.onRemove}
                   onDuplicate={photo.onDuplicate}
                   onChangePhoto={photo.onChangePhoto}
+                  onCropPhoto={photo.onCropPhoto}
                 />
               </div>
             </div>

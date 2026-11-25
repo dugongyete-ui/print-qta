@@ -846,6 +846,79 @@ export function usePrintStation() {
   );
 
   /**
+   * "Potong Foto" — commit a cropped copy of a photo's source image and point
+   * every placement that referenced the original at the cropped version, so
+   * all copies on the sheet (pas-foto tiles) update in one gesture. The
+   * untouched original stays in the queue for re-cropping. Goes through the
+   * standard image inspection; no auto-grid / intake side effects.
+   */
+  const cropPhotoItem = useCallback(
+    (itemId: string, incoming: File) => {
+      const targets = photoPlacementsRef.current.filter(
+        (p) => p.itemId === itemId,
+      );
+      if (targets.length === 0) return;
+      const ext = (incoming.name.split(".").pop() ?? "").toLowerCase();
+      const accepted = ACCEPTED_EXT[ext];
+      if (!accepted || accepted.kind !== "image") {
+        toast.error("Hasil potongan bukan gambar yang valid.");
+        return;
+      }
+      const id = newId();
+      const loaded: LoadedFile = {
+        id,
+        name: incoming.name,
+        ext,
+        sizeBytes: incoming.size,
+        kind: "image",
+        mime: accepted.mime,
+        bytes: null,
+        url: null,
+        status: "loading",
+        pageCount: null,
+        docWidthMm: null,
+        docHeightMm: null,
+        docLabel: null,
+      };
+      setFiles((prev) => [...prev, loaded]);
+      incoming
+        .arrayBuffer()
+        .then(async (buf) => {
+          const bytes = new Uint8Array(buf);
+          const probe: LoadedFile = { ...loaded, bytes };
+          const patch = await inspectImage(probe);
+          if (patch.status === "ready") {
+            patchFile(id, { bytes, ...patch });
+            setPhotoPlacements((list) =>
+              list.map((p) =>
+                p.itemId === itemId
+                  ? { ...p, itemId: id, cropX: 0, cropY: 0 }
+                  : p,
+              ),
+            );
+            toast.success("Foto dipotong.", {
+              description:
+                targets.length > 1
+                  ? `${targets.length} salinan foto di lembar ikut diperbarui.`
+                  : `${incoming.name} menggantikan foto di slot ini.`,
+            });
+          } else {
+            patchFile(id, { bytes, ...patch });
+            toast.error("Hasil potongan tidak dapat diproses.", {
+              description: patch.error ?? "Gambar tidak dapat dibaca.",
+            });
+            setFiles((prev) => prev.filter((f) => f.id !== id));
+          }
+        })
+        .catch(() => {
+          toast.error("Gagal memproses potongan foto.");
+          setFiles((prev) => prev.filter((f) => f.id !== id));
+        });
+    },
+    [patchFile],
+  );
+
+  /**
    * Batch geometry edit — group drag / group nudge / align / single resize.
    * Hand edit pauses auto re-tiling so a manual layout is never reshuffled by
    * the next upload.
@@ -1718,6 +1791,7 @@ export function usePrintStation() {
     addAllImagesToSheet,
     addPhotoFiles,
     replacePhotoItem,
+    cropPhotoItem,
     // document accessors for renderers
     getPdfDoc: loadPdfDoc,
     getDocxRender: renderDocx,
