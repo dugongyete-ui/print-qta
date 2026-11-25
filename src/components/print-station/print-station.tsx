@@ -91,6 +91,7 @@ export function PrintStation() {
                   onUpdateMany: store.updatePhotoPlacements,
                   onRemove: store.removePhotoPlacements,
                   onDuplicate: store.duplicatePhotoPlacements,
+                  onChangePhoto: store.replacePhotoItem,
                 }
               : null
           }
@@ -120,6 +121,8 @@ export function PrintStation() {
           canPrint={store.canPrint}
           printing={store.printing}
           onPrint={() => void store.triggerPrint()}
+          mobileOpen={sidebarOpen}
+          onOpenChange={setSidebarOpen}
           photoMode={store.photoMode}
           photo={{
             placements: store.photoPlacements,
@@ -152,6 +155,7 @@ export function PrintStation() {
             onClear: store.clearPhotoPlacements,
             onAddImages: store.addAllImagesToSheet,
             onAddPhotoFiles: store.addPhotoFiles,
+            onChangePhoto: store.replacePhotoItem,
           }}
         />
       </main>

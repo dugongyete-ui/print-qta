@@ -9,7 +9,7 @@
 // so the editor, the preview and the print rasterizer stay in agreement.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ImagePlus } from "lucide-react";
+import { Copy, ImagePlus, Repeat, RotateCw, Trash2 } from "lucide-react";
 import { MIN_PHOTO_MM, type LoadedFile, type PhotoAdjustments, type PhotoPlacement } from "@/lib/print-station/types";
 import { photoAdjustFilterCss } from "@/lib/print-station/engine";
 
@@ -54,6 +54,8 @@ interface PhotoCanvasProps {
   ) => void;
   onRemove: (ids: string[]) => void;
   onDuplicate: (ids: string[]) => void;
+  /** "Ubah Foto" — swap the source image of this slot in place. */
+  onChangePhoto: (placementId: string, file: File) => void;
 }
 
 type Gesture =
@@ -185,6 +187,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     onUpdateMany,
     onRemove,
     onDuplicate,
+    onChangePhoto,
   } = props;
 
   const gestureRef = useRef<Gesture | null>(null);
@@ -573,6 +576,10 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
               width: p.wMm * k,
               height: p.hMm * k,
               transform: `rotate(${p.rotation}deg)`,
+              // Selected photos (and their floating toolbar / handles) paint
+              // above sibling placements — DOM order alone would bury the
+              // toolbar under later-row photos.
+              zIndex: selected ? (isPrimary ? 30 : 20) : undefined,
             }}
             role="button"
             tabIndex={0}
@@ -599,6 +606,73 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
                 className="pointer-events-none absolute inset-0 z-[5] border border-dashed border-[#AEB4BC]"
                 aria-hidden="true"
               />
+            ) : null}
+
+            {/* Quick-action toolbar (single primary selection) — "Ubah Foto"
+                swaps the source image in place; rotate / duplicate / delete
+                mirror the inspector so the common fixes live on the photo. */}
+            {isPrimary && selectedIds.length === 1 ? (
+              <div
+                data-testid="photo-toolbar"
+                className="absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white p-0.5 shadow-[0_2px_8px_rgba(17,24,39,0.16)]"
+                style={
+                  p.yMm * k > 40
+                    ? { bottom: "100%", marginBottom: 6 }
+                    : { top: "100%", marginTop: 6 }
+                }
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <label
+                  className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded px-2 text-[11px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+                  title="Ganti foto di slot ini dengan file lain — posisi & ukuran tetap"
+                >
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg"
+                    className="sr-only"
+                    aria-label={`Ubah foto ${i + 1}`}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) onChangePhoto(p.id, f);
+                      e.target.value = "";
+                    }}
+                  />
+                  <Repeat size={11} strokeWidth={2} aria-hidden="true" />
+                  Ubah Foto
+                </label>
+                <span className="mx-0.5 h-4 w-px bg-[#E5E7EB]" aria-hidden="true" />
+                <button
+                  type="button"
+                  title="Putar 90° searah jarum jam"
+                  aria-label={`Putar foto ${i + 1}`}
+                  onClick={() =>
+                    onUpdateMany([
+                      { id: p.id, patch: { rotation: p.rotation + 90 } },
+                    ])
+                  }
+                  className="flex h-7 w-7 items-center justify-center rounded text-[#374151] transition-colors hover:bg-[#F3F4F6]"
+                >
+                  <RotateCw size={12} strokeWidth={1.5} />
+                </button>
+                <button
+                  type="button"
+                  title="Duplikat foto ini"
+                  aria-label={`Duplikat foto ${i + 1}`}
+                  onClick={() => onDuplicate([p.id])}
+                  className="flex h-7 w-7 items-center justify-center rounded text-[#374151] transition-colors hover:bg-[#F3F4F6]"
+                >
+                  <Copy size={12} strokeWidth={1.5} />
+                </button>
+                <button
+                  type="button"
+                  title="Hapus foto ini dari lembar"
+                  aria-label={`Hapus foto ${i + 1}`}
+                  onClick={() => onRemove([p.id])}
+                  className="flex h-7 w-7 items-center justify-center rounded text-[#9CA3AF] transition-colors hover:bg-[#FEF2F2] hover:text-[#DC2626]"
+                >
+                  <Trash2 size={12} strokeWidth={1.5} />
+                </button>
+              </div>
             ) : null}
 
             {/* Word-like resize handles (primary photo only) */}

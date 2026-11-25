@@ -49,6 +49,8 @@ interface PhotoStageData {
   ) => void;
   onRemove: (ids: string[]) => void;
   onDuplicate: (ids: string[]) => void;
+  /** "Ubah Foto" — swap one slot's source image in place. */
+  onChangePhoto: (placementId: string, file: File) => void;
 }
 
 interface PreviewStageProps {
@@ -489,6 +491,7 @@ export function PreviewStage(props: PreviewStageProps) {
                   onUpdateMany={photo.onUpdateMany}
                   onRemove={photo.onRemove}
                   onDuplicate={photo.onDuplicate}
+                  onChangePhoto={photo.onChangePhoto}
                 />
               </div>
             </div>

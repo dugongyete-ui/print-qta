@@ -766,6 +766,86 @@ export function usePrintStation() {
   );
 
   /**
+   * "Ubah Foto" — swap the source image of ONE placement in place. The slot,
+   * size, rotation and the rest of the layout stay untouched; the replacement
+   * file goes through the standard image inspection before the swap commits.
+   * Queue focus and the auto-grid are deliberately left alone.
+   */
+  const replacePhotoItem = useCallback(
+    (placementId: string, incoming: File) => {
+      const ext = (incoming.name.split(".").pop() ?? "").toLowerCase();
+      const accepted = ACCEPTED_EXT[ext];
+      if (!accepted || accepted.kind !== "image") {
+        toast.error(`${incoming.name} bukan foto.`, {
+          description: "Ubah Foto hanya menerima PNG/JPG.",
+        });
+        return;
+      }
+      if (incoming.size > MAX_FILE_BYTES) {
+        toast.error("Ukuran file melebihi 50 MB.", {
+          description: incoming.name,
+        });
+        return;
+      }
+      if (
+        !photoPlacementsRef.current.some((p) => p.id === placementId)
+      ) {
+        return;
+      }
+      const id = newId();
+      const loaded: LoadedFile = {
+        id,
+        name: incoming.name,
+        ext,
+        sizeBytes: incoming.size,
+        kind: "image",
+        mime: accepted.mime,
+        bytes: null,
+        url: null,
+        status: "loading",
+        pageCount: null,
+        docWidthMm: null,
+        docHeightMm: null,
+        docLabel: null,
+      };
+      setFiles((prev) => [...prev, loaded]);
+      incoming
+        .arrayBuffer()
+        .then(async (buf) => {
+          const bytes = new Uint8Array(buf);
+          const probe: LoadedFile = { ...loaded, bytes };
+          const patch = await inspectImage(probe);
+          if (patch.status === "ready") {
+            patchFile(id, { bytes, ...patch });
+            setPhotoPlacements((list) =>
+              list.map((p) =>
+                p.id === placementId
+                  ? { ...p, itemId: id, cropX: 0, cropY: 0 }
+                  : p,
+              ),
+            );
+            toast.success("Foto diganti.", {
+              description: `${incoming.name} menggantikan foto pada slot ini — posisi & ukuran tetap.`,
+            });
+          } else {
+            patchFile(id, { bytes, ...patch });
+            toast.error("Foto pengganti tidak dapat dibuka.", {
+              description: `${incoming.name} — ${patch.error ?? "format tidak didukung."}`,
+            });
+            setFiles((prev) => prev.filter((f) => f.id !== id));
+          }
+        })
+        .catch(() => {
+          toast.error("Gagal membaca file dari disk.", {
+            description: incoming.name,
+          });
+          setFiles((prev) => prev.filter((f) => f.id !== id));
+        });
+    },
+    [patchFile],
+  );
+
+  /**
    * Batch geometry edit — group drag / group nudge / align / single resize.
    * Hand edit pauses auto re-tiling so a manual layout is never reshuffled by
    * the next upload.
@@ -1637,6 +1717,7 @@ export function usePrintStation() {
     alignPhotoPlacement,
     addAllImagesToSheet,
     addPhotoFiles,
+    replacePhotoItem,
     // document accessors for renderers
     getPdfDoc: loadPdfDoc,
     getDocxRender: renderDocx,

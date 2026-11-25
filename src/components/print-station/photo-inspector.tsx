@@ -17,6 +17,7 @@ import {
   LayoutGrid,
   Minus,
   Plus,
+  Repeat,
   RotateCcw,
   Rows3,
   Sparkles,
@@ -244,6 +245,8 @@ interface PhotoInspectorProps {
   onAddImages: () => void;
   /** "Tambah Foto" picker intake — image-only, batch-friendly. */
   onAddPhotoFiles: (files: File[]) => void;
+  /** "Ubah Foto" — swap the source image of one slot in place. */
+  onChangePhoto: (placementId: string, file: File) => void;
 }
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
@@ -277,6 +280,7 @@ export function PhotoInspector({
   onClear,
   onAddImages,
   onAddPhotoFiles,
+  onChangePhoto,
 }: PhotoInspectorProps) {
   const selectedCount = selectedIds.length;
   // "Jumlah Foto" lives in the shared photo settings so this control, photo
@@ -413,6 +417,33 @@ export function PhotoInspector({
       >
         {selected ? (
           <>
+            {/* Sumber foto + quick replace — the most common operator fix:
+                wrong photo in a slot, swap it without touching the layout. */}
+            <div className="flex flex-col gap-1.5 rounded-md border border-[#E5E7EB] bg-[#F9FAFB] px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-[9.5px] uppercase tracking-[0.06em] text-[#6B7280]">
+                  Sumber Foto
+                </span>
+                <span className="max-w-[170px] truncate font-mono text-[10px] text-[#374151]">
+                  {files.find((f) => f.id === selected.itemId)?.name ?? "—"}
+                </span>
+              </div>
+              <label className="flex h-8 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-[#003399] bg-white text-[11.5px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5">
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  className="sr-only"
+                  aria-label="Ganti foto terpilih dengan file lain"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onChangePhoto(selected.id, f);
+                    e.target.value = "";
+                  }}
+                />
+                <Repeat size={12} strokeWidth={1.5} />
+                Ubah Foto Slot Ini
+              </label>
+            </div>
             <div className="flex gap-2">
               <NumField
                 label="Posisi X"
