@@ -5,12 +5,17 @@
 // guarantees the primary "Cetak ke Epson" action is reachable at every
 // breakpoint, with the monospace job summary alongside it.
 
+import type { PreflightReport } from "@/lib/print-station/types";
+import { PreflightMini } from "./preflight-panel";
+
 interface PrintActionBarProps {
   summary: string;
   rangeInvalid: boolean;
   canPrint: boolean;
   printing: boolean;
   onPrint: () => void;
+  /** Live preflight status — one compact line next to the summary. */
+  preflight?: PreflightReport;
 }
 
 export function PrintActionBar({
@@ -19,6 +24,7 @@ export function PrintActionBar({
   canPrint,
   printing,
   onPrint,
+  preflight,
 }: PrintActionBarProps) {
   return (
     <footer
@@ -43,6 +49,8 @@ export function PrintActionBar({
         >
           {rangeInvalid ? "Periksa rentang halaman" : summary}
         </p>
+
+        {preflight && preflight.sheets > 0 ? <PreflightMini report={preflight} /> : null}
 
         <button
           type="button"

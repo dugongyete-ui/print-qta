@@ -5,11 +5,13 @@
 
 import {
   FileText,
+  GraduationCap,
   HardDrive,
   Image as ImageIcon,
   Monitor,
   Printer,
   Settings2,
+  Sprout,
 } from "lucide-react";
 import {
   DOC_PAPER_IDS,
@@ -20,6 +22,13 @@ import {
 } from "@/lib/paper";
 import type { PrintMode, SpoolerState } from "@/lib/print-station/types";
 import { Segmented } from "./segmented";
+import { GuidedWizard } from "./guided-wizard";
+import type {
+  GuidedGoal,
+  GuidedOutcome,
+  GuidedPaper,
+  UiLevel,
+} from "@/hooks/use-print-station";
 import {
   Select,
   SelectContent,
@@ -41,6 +50,11 @@ interface TopBarProps {
   onPrintModeChange: (mode: PrintMode) => void;
   spooler: SpoolerState;
   onOpenSidebar: () => void;
+  /** "Mode Pemula / Lanjutan" toggle. */
+  uiLevel: UiLevel;
+  onUiLevelChange: (v: UiLevel) => void;
+  /** "Bantu Saya Cetak" wizard submission. */
+  onApplyGuided: (goal: GuidedGoal, paper: GuidedPaper, outcome: GuidedOutcome) => void;
 }
 
 export function TopBar({
@@ -52,6 +66,9 @@ export function TopBar({
   onPrintModeChange,
   spooler,
   onOpenSidebar,
+  uiLevel,
+  onUiLevelChange,
+  onApplyGuided,
 }: TopBarProps) {
   const spoolerDot =
     spooler.state === "available" ? "ok" : spooler.state === "checking" ? "wait" : "off";
@@ -74,6 +91,9 @@ export function TopBar({
       </div>
 
       <div className="ml-auto flex shrink-0 items-center gap-2">
+        {/* "Bantu Saya Cetak" — plain-language 3-question wizard */}
+        <GuidedWizard onApply={onApplyGuided} />
+
         {/* Work mode: document vs photo layout editor */}
         <Segmented<WorkMode>
           value={workMode}
@@ -162,6 +182,27 @@ export function TopBar({
             },
           ]}
           title="Mode eksekusi cetak"
+        />
+
+        {/* Mode Pemula / Lanjutan — beginners see only the essentials */}
+        <Segmented<UiLevel>
+          value={uiLevel}
+          onChange={onUiLevelChange}
+          options={[
+            {
+              value: "beginner",
+              label: "Pemula",
+              icon: <Sprout size={13} strokeWidth={1.5} aria-hidden="true" />,
+              labelClassName: "hidden xl:inline",
+            },
+            {
+              value: "advanced",
+              label: "Lanjutan",
+              icon: <GraduationCap size={13} strokeWidth={1.5} aria-hidden="true" />,
+              labelClassName: "hidden xl:inline",
+            },
+          ]}
+          title="Mode tampilan — Pemula menyederhanakan menu, Lanjutan menampilkan semua pengaturan"
         />
 
         {/* Inspector toggle (tablet / mobile — desktop shows the fixed sidebar) */}

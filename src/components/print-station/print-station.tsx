@@ -57,6 +57,9 @@ export function PrintStation() {
         onPrintModeChange={handlePrintModeChange}
         spooler={store.spooler}
         onOpenSidebar={() => setSidebarOpen(true)}
+        uiLevel={store.uiLevel}
+        onUiLevelChange={store.setUiLevel}
+        onApplyGuided={store.applyGuidedChoice}
       />
 
       <main className="flex min-h-0 flex-1">
@@ -97,6 +100,8 @@ export function PrintStation() {
                   onChangePhoto: store.replacePhotoItem,
                   onCropPhoto: setCropPlacementId,
                   onCoverPhoto: (id) => store.coverPhotoSheet([id]),
+                  onBeginHistory: store.beginPhotoHistory,
+                  onEndHistory: store.endPhotoHistory,
                 }
               : null
           }
@@ -129,6 +134,14 @@ export function PrintStation() {
           mobileOpen={sidebarOpen}
           onOpenChange={setSidebarOpen}
           photoMode={store.photoMode}
+          uiLevel={store.uiLevel}
+          preflight={store.preflight}
+          onAutoFixPreflight={store.autoFixPreflight}
+          onViewProblem={(issue) => {
+            const first = issue.placementIds?.[0];
+            if (first) store.selectPhotoPlacement(first);
+          }}
+          onJobPreset={store.applyJobPreset}
           photo={{
             placements: store.photoPlacements,
             selected: store.photoSelected,
@@ -163,6 +176,12 @@ export function PrintStation() {
             onChangePhoto: store.replacePhotoItem,
             onCropPhoto: setCropPlacementId,
             onCoverSheet: store.coverPhotoSheet,
+            onOptimize: store.optimizePhotoLayout,
+            onExportSheet: (format) => void store.exportPhotoSheet(format),
+            onUndoPhoto: store.undoPhoto,
+            onRedoPhoto: store.redoPhoto,
+            canUndoPhoto: store.canUndoPhoto,
+            canRedoPhoto: store.canRedoPhoto,
           }}
         />
       </main>
@@ -174,6 +193,7 @@ export function PrintStation() {
         canPrint={store.canPrint}
         printing={store.printing}
         onPrint={() => void store.triggerPrint()}
+        preflight={store.preflight}
       />
 
       {/* "Potong Foto" — interactive crop dialog for the targeted slot's photo */}

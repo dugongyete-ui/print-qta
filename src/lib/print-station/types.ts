@@ -242,3 +242,45 @@ export const DEFAULT_PHOTO_SETTINGS: PhotoSettings = {
 /** Hard cap so a runaway fill cannot flood the print engine. */
 export const MAX_PLACEMENTS = 200;
 export const MIN_PHOTO_MM = 10;
+
+// ---------------------------------------------------------------------------
+// Preflight check (pre-print verification) — drives the status panel that
+// tells the operator whether the job is safe to print BEFORE paper is wasted.
+// ---------------------------------------------------------------------------
+
+export type PreflightSeverity = "error" | "warn" | "info";
+
+export interface PreflightIssue {
+  id: string;
+  severity: PreflightSeverity;
+  /** Short title e.g. "Foto tumpang tindih". */
+  label: string;
+  /** One-sentence human explanation (Indonesian). */
+  detail: string;
+  /** Whether "Perbaiki Otomatis" can resolve this issue. */
+  fixable: boolean;
+  /** Offending placements — "Lihat" focuses the first one on the canvas. */
+  placementIds?: string[];
+}
+
+export interface PreflightReport {
+  status: "ok" | "warn" | "error";
+  /** "Siap dicetak" / "1 hal perlu diperiksa" / "2 masalah perlu diperbaiki". */
+  headline: string;
+  items: PreflightIssue[];
+  /** Rough ink usage estimate for the job. */
+  ink: "rendah" | "sedang" | "tinggi";
+  /** Physical sheets the job will consume. */
+  sheets: number;
+  /** Share of the sheet covered by content (%). */
+  coveragePct: number;
+}
+
+export const EMPTY_PREFLIGHT: PreflightReport = {
+  status: "ok",
+  headline: "Belum ada pekerjaan",
+  items: [],
+  ink: "rendah",
+  sheets: 0,
+  coveragePct: 0,
+};

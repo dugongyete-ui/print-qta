@@ -14,11 +14,15 @@ import {
   getPaperType,
   type LoadedFile,
   type PaperType,
+  type PreflightIssue,
+  type PreflightReport,
   type PrintSettings,
 } from "@/lib/print-station/types";
+import { JOB_PRESETS, type JobPresetId } from "@/lib/print-station/job-presets";
 import type { PhotoPreset } from "@/lib/print-station/photo-sizes";
 import type {
   PhotoAlign,
+  UiLevel,
 } from "@/hooks/use-print-station";
 import type {
   GridAlignH,
@@ -28,6 +32,7 @@ import type {
 } from "@/lib/print-station/types";
 import { Segmented } from "./segmented";
 import { PhotoInspector } from "./photo-inspector";
+import { PreflightPanel } from "./preflight-panel";
 import {
   Select,
   SelectContent,
@@ -116,17 +121,29 @@ export interface PhotoPanelData {
   /** "Penuhi Lembar" — enlarge the selection until it covers the entire
    * sheet (full-bleed, no empty paper left). */
   onCoverSheet: (ids: string[]) => void;
+  /** "Optimalkan Otomatis" — the primary one-tap arrangement pass. */
+  onOptimize: () => void;
+  /** Export the sheet as PNG / PDF. */
+  onExportSheet: (format: "png" | "pdf") => void;
+  /** Undo / redo the layout. */
+  onUndoPhoto: () => void;
+  onRedoPhoto: () => void;
+  canUndoPhoto: boolean;
+  canRedoPhoto: boolean;
 }
 
 function ColorQualitySection({
   settings,
   onSetting,
+  uiLevel,
 }: {
   settings: PrintSettings;
+  uiLevel: UiLevel;
   onSetting: <K extends keyof PrintSettings>(key: K, value: PrintSettings[K]) => void;
 }) {
   const paperType = getPaperType(settings.paperType);
   const isPhotoPaper = settings.paperType !== "plain";
+  const adv = uiLevel === "advanced";
   return (
     <Section title="Warna & Kualitas Epson">
       <Row label="Mode Warna">
@@ -139,56 +156,62 @@ function ColorQualitySection({
           ]}
         />
       </Row>
-      <div className="flex flex-col gap-1.5">
-        <Row label="Jenis Kertas">
-          <Select
-            value={settings.paperType}
-            onValueChange={(v) => {
-              const t = v as PaperType;
-              onSetting("paperType", t);
-              // Epson-like recommendation: photo paper deserves high quality.
-              if (t !== "plain" && settings.quality !== "high") {
-                onSetting("quality", "high");
-                toast.info("Kualitas dinaikkan ke Tinggi", {
-                  description: `${getPaperType(t).label} menghasilkan warna terbaik pada kualitas Tinggi.`,
-                });
-              }
-            }}
-          >
-            <SelectTrigger
-              aria-label="Jenis kertas di tray"
-              className="h-8 w-[170px] rounded-md border-[#E5E7EB] text-[11.5px] text-[#111827] shadow-none focus:ring-1 focus:ring-[#003399]"
+      {adv ? (
+        <div className="flex flex-col gap-1.5">
+          <Row label="Jenis Kertas">
+            <Select
+              value={settings.paperType}
+              onValueChange={(v) => {
+                const t = v as PaperType;
+                onSetting("paperType", t);
+                // Epson-like recommendation: photo paper deserves high quality.
+                if (t !== "plain" && settings.quality !== "high") {
+                  onSetting("quality", "high");
+                  toast.info("Kualitas dinaikkan ke Tinggi", {
+                    description: `${getPaperType(t).label} menghasilkan warna terbaik pada kualitas Tinggi.`,
+                  });
+                }
+              }}
             >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="rounded-md border-[#E5E7EB]">
-              {PAPER_TYPES.map((t) => (
-                <SelectItem key={t.id} value={t.id} className="text-[11.5px]">
-                  {t.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+              <SelectTrigger
+                aria-label="Jenis kertas di tray"
+                className="h-8 w-[170px] rounded-md border-[#E5E7EB] text-[11.5px] text-[#111827] shadow-none focus:ring-1 focus:ring-[#003399]"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="rounded-md border-[#E5E7EB]">
+                {PAPER_TYPES.map((t) => (
+                  <SelectItem key={t.id} value={t.id} className="text-[11.5px]">
+                    {t.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Row>
+          <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+            {paperType.hint}
+          </p>
+        </div>
+      ) : null}
+      {adv ? (
+        <Row label="Kualitas Cetak">
+          <Segmented
+            value={settings.quality}
+            onChange={(v) => onSetting("quality", v)}
+            options={[
+              { value: "draft", label: "Draf" },
+              { value: "standard", label: "Standar" },
+              { value: "high", label: "Tinggi" },
+            ]}
+          />
         </Row>
-        <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
-          {paperType.hint}
+      ) : null}
+      {adv ? (
+        <p className="font-mono text-[10px] text-[#6B7280]">
+          {QUALITY_HINT[settings.quality]}
         </p>
-      </div>
-      <Row label="Kualitas Cetak">
-        <Segmented
-          value={settings.quality}
-          onChange={(v) => onSetting("quality", v)}
-          options={[
-            { value: "draft", label: "Draf" },
-            { value: "standard", label: "Standar" },
-            { value: "high", label: "Tinggi" },
-          ]}
-        />
-      </Row>
-      <p className="font-mono text-[10px] text-[#6B7280]">
-        {QUALITY_HINT[settings.quality]}
-      </p>
-      {isPhotoPaper ? (
+      ) : null}
+      {adv && isPhotoPaper ? (
         <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
           Gunakan Kualitas Tinggi + beri waktu kering 10–15 menit sebelum
           menumpuk hasil cetak foto.
@@ -296,6 +319,14 @@ interface SidebarContentProps {
   onPrint: () => void;
   photoMode: boolean;
   photo: PhotoPanelData;
+  /** "Mode Pemula" keeps the panel lean. */
+  uiLevel: UiLevel;
+  /** Live pre-print check report. */
+  preflight: PreflightReport;
+  onAutoFixPreflight: () => void;
+  onViewProblem: (issue: PreflightIssue) => void;
+  /** "Pekerjaan Cepat" one-tap presets. */
+  onJobPreset: (id: JobPresetId) => void;
 }
 
 function SidebarContent({
@@ -309,8 +340,17 @@ function SidebarContent({
   onPrint,
   photoMode,
   photo,
+  uiLevel,
+  preflight,
+  onAutoFixPreflight,
+  onViewProblem,
+  onJobPreset,
 }: SidebarContentProps) {
   const disabled = !file || file.status !== "ready";
+  const adv = uiLevel === "advanced";
+  const presets = JOB_PRESETS.filter((p) =>
+    photoMode ? p.mode === "photo" : p.mode === "doc",
+  );
 
   return (
     <>
@@ -332,6 +372,27 @@ function SidebarContent({
             <span className="font-mono text-[10px] text-[#9CA3AF]">belum ada dokumen</span>
           )}
         </div>
+
+        {/* "Pekerjaan Cepat" — complete field-tested configurations, one tap. */}
+        <Section title="Pekerjaan Cepat">
+          <div className="flex flex-wrap gap-1.5">
+            {presets.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => onJobPreset(p.id)}
+                title={p.hint}
+                aria-label={`Preset pekerjaan: ${p.label}`}
+                className="h-7 rounded-md border border-[#E5E7EB] bg-white px-2 text-[11px] font-medium text-[#374151] transition-colors hover:border-[#003399] hover:bg-[#003399]/5 hover:text-[#003399]"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+            Satu klik mengatur kertas, ukuran, margin, dan kualitas sekaligus.
+          </p>
+        </Section>
 
         {photoMode ? (
           <>
@@ -365,8 +426,15 @@ function SidebarContent({
               onChangePhoto={photo.onChangePhoto}
               onCropPhoto={photo.onCropPhoto}
               onCoverSheet={photo.onCoverSheet}
+              onOptimize={photo.onOptimize}
+              onExportSheet={photo.onExportSheet}
+              onUndoPhoto={photo.onUndoPhoto}
+              onRedoPhoto={photo.onRedoPhoto}
+              canUndoPhoto={photo.canUndoPhoto}
+              canRedoPhoto={photo.canRedoPhoto}
+              uiLevel={uiLevel}
             />
-            <ColorQualitySection settings={settings} onSetting={onSetting} />
+            <ColorQualitySection settings={settings} onSetting={onSetting} uiLevel={uiLevel} />
             <Section title="Salinan">
               <CopiesSection
                 copies={settings.copies}
@@ -420,55 +488,59 @@ function SidebarContent({
               ) : null}
             </Section>
 
-            <ColorQualitySection settings={settings} onSetting={onSetting} />
+            <ColorQualitySection settings={settings} onSetting={onSetting} uiLevel={uiLevel} />
 
             {/* Halaman & Salinan */}
             <Section title="Halaman & Salinan">
-              <div className="flex flex-col gap-2">
-                <Row label="Rentang Halaman">
-                  <Segmented
-                    value={settings.rangeMode}
-                    onChange={(v) => onSetting("rangeMode", v)}
-                    options={[
-                      { value: "all", label: "Semua" },
-                      { value: "custom", label: "Kustom" },
-                    ]}
-                  />
-                </Row>
-                {settings.rangeMode === "custom" ? (
-                  <input
-                    type="text"
-                    value={settings.rangeText}
-                    onChange={(e) => onSetting("rangeText", e.target.value)}
-                    placeholder="cth. 1-3, 5"
-                    aria-label="Rentang halaman kustom"
-                    spellCheck={false}
-                    className={`h-8 w-full rounded-md border bg-white px-2.5 font-mono text-[11.5px] tabular-nums text-[#111827] outline-none transition-colors placeholder:text-[#9CA3AF] ${
-                      rangeInvalid
-                        ? "border-[#F59E0B] focus:border-[#F59E0B]"
-                        : "border-[#E5E7EB] focus:border-[#003399]"
-                    }`}
-                  />
-                ) : null}
-                {rangeInvalid ? (
-                  <p className="font-mono text-[10px] text-[#92400E]">
-                    Rentang tidak valid — gunakan format 1-3, 5 (maks. {file?.pageCount ?? 1})
-                  </p>
-                ) : null}
-              </div>
+              {adv ? (
+                <div className="flex flex-col gap-2">
+                  <Row label="Rentang Halaman">
+                    <Segmented
+                      value={settings.rangeMode}
+                      onChange={(v) => onSetting("rangeMode", v)}
+                      options={[
+                        { value: "all", label: "Semua" },
+                        { value: "custom", label: "Kustom" },
+                      ]}
+                    />
+                  </Row>
+                  {settings.rangeMode === "custom" ? (
+                    <input
+                      type="text"
+                      value={settings.rangeText}
+                      onChange={(e) => onSetting("rangeText", e.target.value)}
+                      placeholder="cth. 1-3, 5"
+                      aria-label="Rentang halaman kustom"
+                      spellCheck={false}
+                      className={`h-8 w-full rounded-md border bg-white px-2.5 font-mono text-[11.5px] tabular-nums text-[#111827] outline-none transition-colors placeholder:text-[#9CA3AF] ${
+                        rangeInvalid
+                          ? "border-[#F59E0B] focus:border-[#F59E0B]"
+                          : "border-[#E5E7EB] focus:border-[#003399]"
+                      }`}
+                    />
+                  ) : null}
+                  {rangeInvalid ? (
+                    <p className="font-mono text-[10px] text-[#92400E]">
+                      Rentang tidak valid — gunakan format 1-3, 5 (maks. {file?.pageCount ?? 1})
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <CopiesSection
                 copies={settings.copies}
                 onCopies={(n) => onSetting("copies", n)}
               />
-              <Row label="Cetak Bolak-Balik (Manual)">
-                <Switch
-                  checked={settings.duplex}
-                  onCheckedChange={(v) => onSetting("duplex", v)}
-                  aria-label="Cetak bolak-balik manual"
-                  className="data-[state=checked]:bg-[#003399]"
-                />
-              </Row>
-              {settings.duplex ? (
+              {adv ? (
+                <Row label="Cetak Bolak-Balik (Manual)">
+                  <Switch
+                    checked={settings.duplex}
+                    onCheckedChange={(v) => onSetting("duplex", v)}
+                    aria-label="Cetak bolak-balik manual"
+                    className="data-[state=checked]:bg-[#003399]"
+                  />
+                </Row>
+              ) : null}
+              {adv && settings.duplex ? (
                 <p className="text-[11px] leading-relaxed text-[#6B7280]">
                   Panduan duplex manual: cetak halaman ganjil, balik &amp; susun
                   ulang tumpukan kertas, lalu cetak sisi genap.
@@ -481,6 +553,14 @@ function SidebarContent({
 
       {/* Sticky footer */}
       <footer className="shrink-0 border-t border-[#E5E7EB] bg-white px-4 pb-4 pt-3">
+        {preflight.sheets > 0 ? (
+          <PreflightPanel
+            report={preflight}
+            photoMode={photoMode}
+            onAutoFix={onAutoFixPreflight}
+            onViewProblem={onViewProblem}
+          />
+        ) : null}
         <p className="mb-2.5 truncate text-center font-mono text-[11.5px] tabular-nums text-[#374151]">
           {rangeInvalid ? (
             <span className="text-[#92400E]">Periksa rentang halaman</span>

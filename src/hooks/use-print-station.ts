@@ -14,10 +14,12 @@ import {
   paperDims,
   parsePageRange,
   sizeLabel,
+  type PaperId,
 } from "@/lib/paper";
 import {
   DEFAULT_PHOTO_SETTINGS,
   DEFAULT_SETTINGS,
+  EMPTY_PREFLIGHT,
   MAX_FILE_BYTES,
   MAX_PLACEMENTS,
   MIN_PHOTO_MM,
@@ -28,6 +30,8 @@ import {
   type LoadedFile,
   type PhotoPlacement,
   type PhotoSettings,
+  type PreflightIssue,
+  type PreflightReport,
   type PrintSettings,
   type SpoolerState,
 } from "@/lib/print-station/types";
@@ -38,6 +42,7 @@ import {
   type PhotoSheetSpec,
 } from "@/lib/print-station/engine";
 import { getPhotoPreset } from "@/lib/print-station/photo-sizes";
+import type { JobPresetId } from "@/lib/print-station/job-presets";
 
 // ---------------------------------------------------------------------------
 // Module-level document caches (survive component re-renders)
@@ -45,6 +50,81 @@ import { getPhotoPreset } from "@/lib/print-station/photo-sizes";
 const pdfTaskCache = new Map<string, Promise<PDFDocumentLoadingTask>>();
 const docxRenderCache = new Map<string, Promise<DocxRender>>();
 const docHtmlCache = new Map<string, Promise<string>>();
+
+// ---------------------------------------------------------------------------
+// Session auto-save (photo mode) — an accidental refresh no longer destroys a
+// tuned sheet: layout, settings and small image bytes live in localStorage
+// until restored via toast, or expire after 48 hours.
+// ---------------------------------------------------------------------------
+
+const SESSION_KEY = "epson-print-station/session-v1";
+const UI_LEVEL_KEY = "epson-print-station/ui-level";
+const SESSION_MAX_FILE_BYTES = 1_200_000;
+const SESSION_MAX_TOTAL_BYTES = 3_500_000;
+const SESSION_MAX_AGE_H = 48;
+
+interface SavedSessionFile {
+  id: string;
+  name: string;
+  ext: string;
+  mime: string;
+  bytesB64: string;
+}
+
+interface SavedSession {
+  v: 1;
+  savedAt: number;
+  settings: PrintSettings;
+  photoSettings: PhotoSettings;
+  placements: PhotoPlacement[];
+  files: SavedSessionFile[];
+}
+
+/** Base64 cache — file bytes are immutable after intake, so encode once. */
+const sessionB64Cache = new Map<string, string>();
+
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/**
+ * Max copies of a w×h photo that fit one sheet (best of portrait/landscape,
+ * clamped by the engine placement cap) — shared by optimize / wizard / presets
+ * so every auto path reports the same numbers the arrangement produces.
+ */
+function gridCapacityFor(
+  wMm: number,
+  hMm: number,
+  marginMm: number,
+  gapMm: number,
+  paperWmm: number,
+  paperHmm: number,
+): number {
+  const printW = paperWmm - 2 * marginMm;
+  const printH = paperHmm - 2 * marginMm;
+  const capFor = (w: number, h: number) => {
+    if (w > printW + PHOTO_TOL || h > printH + PHOTO_TOL) return 0;
+    return (
+      Math.max(1, Math.floor((printW + gapMm) / (w + gapMm))) *
+      Math.max(1, Math.floor((printH + gapMm) / (h + gapMm)))
+    );
+  };
+  return Math.min(Math.max(capFor(wMm, hMm), capFor(hMm, wMm)), MAX_PLACEMENTS);
+}
 
 const ACCEPTED_EXT: Record<string, { kind: LoadedFile["kind"]; mime: string }> = {
   pdf: { kind: "pdf", mime: "application/pdf" },
@@ -346,6 +426,12 @@ export interface DuplexAssist {
   evenPages: number[];
 }
 
+export type GuidedGoal = "doc" | "pas-foto" | "banyak-foto" | "lembar-penuh";
+export type GuidedPaper = "a4" | "f4" | "4r" | "custom";
+export type GuidedOutcome = "hemat" | "asli" | "kualitas" | "semua";
+
+export type UiLevel = "beginner" | "advanced";
+
 export function usePrintStation() {
   const [files, setFiles] = useState<LoadedFile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -364,6 +450,25 @@ export function usePrintStation() {
     state: "checking",
     info: null,
   });
+  /** "Mode Pemula" hides advanced controls; "Mode Lanjutan" shows everything. */
+  const [uiLevel, setUiLevelState] = useState<UiLevel>(() => {
+    if (typeof window === "undefined") return "advanced";
+    try {
+      return window.localStorage.getItem(UI_LEVEL_KEY) === "beginner"
+        ? "beginner"
+        : "advanced";
+    } catch {
+      return "advanced";
+    }
+  });
+
+  // -- photo layout history (undo / redo) -------------------------------------
+  const photoHistoryPastRef = useRef<PhotoPlacement[][]>([]);
+  const photoHistoryFutureRef = useRef<PhotoPlacement[][]>([]);
+  /** True while a drag/resize gesture is open — its updates form ONE step. */
+  const photoHistoryOpenRef = useRef(false);
+  const lastPhotoHistoryPushRef = useRef(0);
+  const [, setPhotoHistoryTick] = useState(0);
 
   const activeFile = useMemo(
     () => files.find((f) => f.id === activeId) ?? null,
@@ -613,6 +718,7 @@ export function usePrintStation() {
       }
       docxRenderCache.delete(id);
       docHtmlCache.delete(id);
+      sessionB64Cache.delete(id);
       const file = files.find((f) => f.id === id);
       if (file?.url) URL.revokeObjectURL(file.url);
       const next = files.filter((f) => f.id !== id);
@@ -714,6 +820,74 @@ export function usePrintStation() {
     }));
   }, []);
 
+  const setUiLevel = useCallback((v: UiLevel) => {
+    setUiLevelState(v);
+    try {
+      window.localStorage.setItem(UI_LEVEL_KEY, v);
+    } catch {
+      /* private mode — level stays for this session only */
+    }
+  }, []);
+
+  // -- photo layout history -----------------------------------------------------
+
+  /** Force one undo snapshot of the current layout (resets redo). */
+  const snapshotPhotoHistory = useCallback(() => {
+    photoHistoryPastRef.current.push(
+      photoPlacementsRef.current.map((p) => ({ ...p })),
+    );
+    if (photoHistoryPastRef.current.length > 60) {
+      photoHistoryPastRef.current.shift();
+    }
+    photoHistoryFutureRef.current = [];
+    lastPhotoHistoryPushRef.current = Date.now();
+    setPhotoHistoryTick((t) => t + 1);
+  }, []);
+
+  /** Coalesced snapshot for discrete edits (nudge, numeric inputs, rotate). */
+  const pushPhotoHistory = useCallback(() => {
+    if (photoHistoryOpenRef.current) return;
+    if (Date.now() - lastPhotoHistoryPushRef.current < 500) return;
+    snapshotPhotoHistory();
+  }, [snapshotPhotoHistory]);
+
+  /** Open a gesture (drag / resize) — all its updates become ONE undo step. */
+  const beginPhotoHistory = useCallback(() => {
+    if (photoHistoryOpenRef.current) return;
+    photoHistoryOpenRef.current = true;
+    snapshotPhotoHistory();
+  }, [snapshotPhotoHistory]);
+
+  const endPhotoHistory = useCallback(() => {
+    photoHistoryOpenRef.current = false;
+  }, []);
+
+  const undoPhoto = useCallback(() => {
+    const past = photoHistoryPastRef.current;
+    if (past.length === 0) return;
+    const prev = past.pop()!;
+    photoHistoryFutureRef.current.push(
+      photoPlacementsRef.current.map((p) => ({ ...p })),
+    );
+    lastPhotoHistoryPushRef.current = 0;
+    setPhotoPlacements(prev);
+    setPhotoSelectedIds([]);
+    setPhotoHistoryTick((t) => t + 1);
+  }, []);
+
+  const redoPhoto = useCallback(() => {
+    const future = photoHistoryFutureRef.current;
+    if (future.length === 0) return;
+    const next = future.pop()!;
+    photoHistoryPastRef.current.push(
+      photoPlacementsRef.current.map((p) => ({ ...p })),
+    );
+    lastPhotoHistoryPushRef.current = 0;
+    setPhotoPlacements(next);
+    setPhotoSelectedIds([]);
+    setPhotoHistoryTick((t) => t + 1);
+  }, []);
+
   /** Place an uploaded image on the sheet at its current preset size. */
   const placeImageOnSheet = useCallback((itemId: string) => {
     const ps = photoSettingsRef.current;
@@ -722,6 +896,7 @@ export function usePrintStation() {
     const w = Math.min(preset.group === "custom" ? ps.customWMm : preset.wMm, paperW);
     const h = Math.min(preset.group === "custom" ? ps.customHMm : preset.hMm, paperH);
     const id = newPhotoId();
+    snapshotPhotoHistory();
     setPhotoPlacements((list) => {
       if (list.length >= MAX_PLACEMENTS) return list;
       const maxBottom = list.reduce((m, p) => Math.max(m, p.yMm + p.hMm), 0);
@@ -947,6 +1122,7 @@ export function usePrintStation() {
   const updatePhotoPlacements = useCallback(
     (updates: Array<{ id: string; patch: Partial<PhotoPlacement> }>) => {
       if (updates.length === 0) return;
+      pushPhotoHistory();
       layoutTouchedRef.current = true;
       const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
       const patches = new Map(updates.map((u) => [u.id, u.patch]));
@@ -962,7 +1138,7 @@ export function usePrintStation() {
         }),
       );
     },
-    [],
+    [pushPhotoHistory],
   );
 
   const updatePhotoPlacement = useCallback(
@@ -974,9 +1150,12 @@ export function usePrintStation() {
 
   const removePhotoPlacements = useCallback((ids: string[]) => {
     if (ids.length === 0) return;
-    layoutTouchedRef.current = true;
     const doomed = new Set(ids);
-    setPhotoPlacements((list) => list.filter((p) => !doomed.has(p.id)));
+    const list = photoPlacementsRef.current;
+    if (!list.some((p) => doomed.has(p.id))) return;
+    snapshotPhotoHistory();
+    layoutTouchedRef.current = true;
+    setPhotoPlacements(list.filter((p) => !doomed.has(p.id)));
     setPhotoSelectedIds((cur) => cur.filter((id) => !doomed.has(id)));
   }, []);
 
@@ -1007,9 +1186,10 @@ export function usePrintStation() {
         paperH,
       ),
     );
+    snapshotPhotoHistory();
     setPhotoPlacements((cur) => [...cur, ...copies]);
     setPhotoSelectedIds(copies.map((c) => c.id));
-  }, []);
+  }, [snapshotPhotoHistory]);
 
   const duplicatePhotoPlacement = useCallback(
     (id: string) => duplicatePhotoPlacements([id]),
@@ -1017,10 +1197,11 @@ export function usePrintStation() {
   );
 
   const clearPhotoPlacements = useCallback(() => {
+    if (photoPlacementsRef.current.length > 0) snapshotPhotoHistory();
     layoutTouchedRef.current = false;
     setPhotoPlacements([]);
     setPhotoSelectedIds([]);
-  }, []);
+  }, [snapshotPhotoHistory]);
 
   /**
    * Auto-grid arrange — the print-shop "ngejajar N foto" flow. Tiles N slots
@@ -1049,12 +1230,17 @@ export function usePrintStation() {
         gapMm?: number;
         alignV?: GridAlignV;
         alignH?: GridAlignH;
+        /** Explicit paper override — guided-mode applies a paper change and
+         * re-tiles in the same tick, where paperDimsRef is still stale. */
+        paperWmm?: number;
+        paperHmm?: number;
       },
     ) => {
       const list = photoPlacementsRef.current;
       if (list.length === 0) return;
       const ps = photoSettingsRef.current;
-      const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+      const paperW = options?.paperWmm ?? paperDimsRef.current.wMm;
+      const paperH = options?.paperHmm ?? paperDimsRef.current.hMm;
       const preset = getPhotoPreset(ps.presetId);
       const presetW = preset.group === "custom" ? ps.customWMm : preset.wMm;
       const presetH = preset.group === "custom" ? ps.customHMm : preset.hMm;
@@ -1186,6 +1372,7 @@ export function usePrintStation() {
           });
         }
       }
+      snapshotPhotoHistory();
       setPhotoPlacements(out);
       setPhotoSelectedIds([]);
       layoutTouchedRef.current = false;
@@ -1226,7 +1413,7 @@ export function usePrintStation() {
         });
       }
     },
-    [],
+    [snapshotPhotoHistory],
   );
 
   /**
@@ -1319,6 +1506,7 @@ export function usePrintStation() {
         return;
       }
       const selId = photoSelectedIdRef.current;
+      snapshotPhotoHistory();
       setPhotoPlacements((list) =>
         list.map((p) => {
           if (selId && p.id !== selId) return p;
@@ -1332,7 +1520,7 @@ export function usePrintStation() {
         }),
       );
     },
-    [arrangePhotoCopies],
+    [arrangePhotoCopies, snapshotPhotoHistory],
   );
 
   /** Fill the whole sheet with copies of the selected photo (pas-foto sheets). */
@@ -1385,7 +1573,7 @@ export function usePrintStation() {
     setPhotoPlacements(out.map((pl) => clampPlacement(pl, paperW, paperH)));
     setPhotoSelectedIds([]);
     toast.success(`Lembar terisi — ${cols} × ${rows} foto (${out.length} salinan).`);
-  }, []);
+  }, [snapshotPhotoHistory]);
 
   /**
    * "Penuhi Lembar" — enlarge until the paper shows no empty area at all.
@@ -1395,16 +1583,19 @@ export function usePrintStation() {
    * whole group is scaled up uniformly around its center until it covers the
    * sheet, keeping relative positions (Word-like "fit group to page").
    */
-  const coverPhotoSheet = useCallback((ids?: string[]) => {
-    const list = photoPlacementsRef.current;
-    if (list.length === 0) return;
-    const wanted = ids && ids.length > 0 ? ids : photoSelectedIdsRef.current;
-    const targets = wanted.length > 0
-      ? list.filter((p) => wanted.includes(p.id))
-      : list;
-    if (targets.length === 0) return;
-    layoutTouchedRef.current = true;
-    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+  const coverPhotoSheet = useCallback(
+    (ids?: string[], opts?: { paperWmm?: number; paperHmm?: number }) => {
+      const list = photoPlacementsRef.current;
+      if (list.length === 0) return;
+      const wanted = ids && ids.length > 0 ? ids : photoSelectedIdsRef.current;
+      const targets = wanted.length > 0
+        ? list.filter((p) => wanted.includes(p.id))
+        : list;
+      if (targets.length === 0) return;
+      snapshotPhotoHistory();
+      layoutTouchedRef.current = true;
+      const paperW = opts?.paperWmm ?? paperDimsRef.current.wMm;
+      const paperH = opts?.paperHmm ?? paperDimsRef.current.hMm;
 
     if (targets.length === 1) {
       const t = targets[0];
@@ -1472,7 +1663,7 @@ export function usePrintStation() {
           "Posisi antar foto tetap — bagian yang melebihi kertas terpotong rapi.",
       },
     );
-  }, []);
+  }, [snapshotPhotoHistory]);
 
   /** Tidy the sheet: pack every placement into rows within the printable area. */
   const autoArrangePhotos = useCallback(() => {
@@ -1502,8 +1693,9 @@ export function usePrintStation() {
       rowH = Math.max(rowH, bb.h);
       return np;
     });
+    snapshotPhotoHistory();
     setPhotoPlacements(out.map((pl) => clampPlacement(pl, paperW, paperH)));
-  }, []);
+  }, [snapshotPhotoHistory]);
 
   /**
    * Align within the printable area (Word-like). With several photos
@@ -1549,6 +1741,956 @@ export function usePrintStation() {
     },
     [updatePhotoPlacements],
   );
+
+  // --------------------------------------------------------------------------
+  // "Optimalkan Otomatis" — one-tap professional pass
+  // --------------------------------------------------------------------------
+
+  /**
+   * Re-grids every distinct photo at the current preset, centered in the
+   * printable area, margins respected — then reports what happened in one
+   * human summary (slots, paper, cropped-or-not, leftover paper %).
+   */
+  const optimizePhotoLayout = useCallback(() => {
+    const list = photoPlacementsRef.current;
+    const ps = photoSettingsRef.current;
+    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+    if (list.length === 0) {
+      toast.info("Belum ada foto di lembar", {
+        description:
+          "Unggah foto PNG/JPG terlebih dahulu, lalu jalankan Optimalkan Otomatis.",
+      });
+      return;
+    }
+    const notReady = list.some((p) => {
+      const it = filesRef.current.find((f) => f.id === p.itemId);
+      return !it || it.kind !== "image" || it.status !== "ready" || !it.url;
+    });
+    if (notReady) {
+      toast.warning("Sebagian foto masih diproses", {
+        description: "Tunggu foto selesai dimuat, lalu jalankan lagi.",
+      });
+      return;
+    }
+    const distinct = new Set(list.map((p) => p.itemId)).size;
+    const preset = getPhotoPreset(ps.presetId);
+    const pw = Math.min(
+      preset.group === "custom" ? ps.customWMm : preset.wMm,
+      paperW,
+    );
+    const ph = Math.min(
+      preset.group === "custom" ? ps.customHMm : preset.hMm,
+      paperH,
+    );
+    const cap = gridCapacityFor(pw, ph, ps.marginMm, ps.gapMm, paperW, paperH);
+    if (cap === 0) {
+      toast.error("Ukuran foto melebihi area cetak", {
+        description:
+          "Kecilkan ukuran foto atau margin lembar, lalu jalankan lagi.",
+      });
+      return;
+    }
+    const total = Math.min(
+      Math.max(ps.perSheet, distinct),
+      cap,
+      MAX_PLACEMENTS,
+    );
+    const overCap = Math.max(0, distinct - total);
+    const willBumpQuality = settingsRef.current.quality === "draft";
+    arrangePhotoCopies(ps.perSheet, {
+      auto: true,
+      coverAll: true,
+      alignV: "center",
+      alignH: "center",
+    });
+    const coveredPct = Math.min(
+      100,
+      Math.round(((total * pw * ph) / (paperW * paperH)) * 100),
+    );
+    const leftover = Math.max(0, 100 - coveredPct);
+    if (willBumpQuality) {
+      setSettings((s) =>
+        s.quality === "draft" ? { ...s, quality: "standard" } : s,
+      );
+    }
+    toast.success(
+      `Selesai — ${total} foto ${preset.short} tersusun di ${getPaper(settingsRef.current.paperId).shortLabel}`,
+      {
+        description: [
+          distinct > 1
+            ? `${distinct} foto berbeda dibagi rata dalam grid.`
+            : null,
+          "Semua foto di dalam margin — tidak ada yang terpotong.",
+          `Perkiraan sisa kertas: ${leftover}%.`,
+          overCap > 0
+            ? `${overCap} foto tidak muat — pilih preset lebih kecil atau kertas lebih besar.`
+            : null,
+          willBumpQuality
+            ? "Kualitas dinaikkan ke Standar agar hasil tidak pudar."
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      },
+    );
+  }, [arrangePhotoCopies]);
+
+  // --------------------------------------------------------------------------
+  // Preflight check — certainty before paper and ink are spent
+  // --------------------------------------------------------------------------
+
+  const photoPreflight = useMemo<PreflightReport>(() => {
+    const placements = photoPlacements;
+    if (placements.length === 0) {
+      return { ...EMPTY_PREFLIGHT, headline: "Belum ada foto di lembar" };
+    }
+    const items: PreflightIssue[] = [];
+
+    const notReady = placements.filter((p) => {
+      const it = files.find((f) => f.id === p.itemId);
+      return !it || it.kind !== "image" || it.status !== "ready" || !it.url;
+    });
+    if (notReady.length > 0) {
+      items.push({
+        id: "not-ready",
+        severity: "error",
+        fixable: false,
+        label: "Foto belum siap",
+        detail: `${notReady.length} foto masih diproses atau gagal dibaca — tunggu sebentar atau ganti fotonya.`,
+        placementIds: notReady.map((p) => p.id),
+      });
+    }
+
+    const overlapIds = new Set<string>();
+    let overlapPairs = 0;
+    for (let i = 0; i < placements.length; i++) {
+      for (let j = i + 1; j < placements.length; j++) {
+        const a = placementBBox(placements[i]);
+        const b = placementBBox(placements[j]);
+        const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+        const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+        if (ox > 0.5 && oy > 0.5) {
+          overlapPairs++;
+          overlapIds.add(placements[i].id);
+          overlapIds.add(placements[j].id);
+        }
+      }
+    }
+    if (overlapPairs > 0) {
+      items.push({
+        id: "overlap",
+        severity: "error",
+        fixable: true,
+        label: "Foto tumpang tindih",
+        detail: `${overlapPairs} pasang foto bertumpuk — hasil cetak saling menutupi. "Perbaiki Otomatis" merapikan jadi barisan.`,
+        placementIds: [...overlapIds],
+      });
+    }
+
+    const crossing = placements.filter((p) => {
+      const bb = placementBBox(p);
+      if (bb.w >= paperWmm - 0.1 && bb.h >= paperHmm - 0.1) return false;
+      return (
+        bb.x < photoSettings.marginMm - PHOTO_TOL ||
+        bb.y < photoSettings.marginMm - PHOTO_TOL ||
+        bb.x + bb.w > paperWmm - photoSettings.marginMm + PHOTO_TOL ||
+        bb.y + bb.h > paperHmm - photoSettings.marginMm + PHOTO_TOL
+      );
+    });
+    if (crossing.length > 0) {
+      items.push({
+        id: "margin",
+        severity: "warn",
+        fixable: true,
+        label: "Menyentuh tepi kertas",
+        detail: `${crossing.length} foto melewati margin ${photoSettings.marginMm} mm — sebagian printer memangkas ±3 mm dari tepi. "Perbaiki Otomatis" mengecilkan & merapikan, atau aktifkan Borderless.`,
+        placementIds: crossing.map((p) => p.id),
+      });
+    }
+
+    const lowRes: Array<{ dpi: number; id: string }> = [];
+    for (const p of placements) {
+      const it = files.find((f) => f.id === p.itemId);
+      if (!it?.url || !it.docWidthMm || !it.docHeightMm) continue;
+      const pxW = it.docWidthMm / PX96_TO_MM;
+      const pxH = it.docHeightMm / PX96_TO_MM;
+      const dpi = Math.min(pxW / (p.wMm / 25.4), pxH / (p.hMm / 25.4));
+      if (dpi < 90) lowRes.push({ dpi: Math.round(dpi), id: p.id });
+    }
+    if (lowRes.length > 0) {
+      const worst = [...lowRes].sort((a, b) => a.dpi - b.dpi)[0];
+      items.push({
+        id: "lowres",
+        severity: worst.dpi < 45 ? "error" : "warn",
+        fixable: false,
+        label: "Resolusi gambar rendah",
+        detail: `${lowRes.length} foto di bawah 90 DPI untuk ukuran cetaknya (terendah ~${worst.dpi} DPI) — hasil berpotensi pecah. Kecilkan ukuran cetak atau pakai file lebih besar.`,
+        placementIds: lowRes.map((x) => x.id),
+      });
+    }
+
+    const covered = placements.reduce((sum, p) => {
+      const bb = placementBBox(p);
+      const cw = Math.min(bb.x + bb.w, paperWmm) - Math.max(bb.x, 0);
+      const ch = Math.min(bb.y + bb.h, paperHmm) - Math.max(bb.y, 0);
+      return sum + Math.max(0, cw) * Math.max(0, ch);
+    }, 0);
+    const coveragePct = Math.min(
+      100,
+      Math.round((covered / (paperWmm * paperHmm)) * 100),
+    );
+    const ink =
+      coveragePct < 15 ? "rendah" : coveragePct < 45 ? "sedang" : "tinggi";
+    const errors = items.filter((i) => i.severity === "error").length;
+    const warns = items.filter((i) => i.severity === "warn").length;
+    const status = errors > 0 ? "error" : warns > 0 ? "warn" : "ok";
+    const headline =
+      status === "ok"
+        ? "Siap dicetak — tidak ada masalah"
+        : errors > 0
+          ? `${errors} masalah perlu diperbaiki`
+          : `${warns} hal perlu diperiksa`;
+    return { status, headline, items, ink, sheets: settings.copies, coveragePct };
+  }, [photoPlacements, files, paperWmm, paperHmm, photoSettings, settings.copies]);
+
+  const docPreflight = useMemo<PreflightReport>(() => {
+    const f = activeFile;
+    if (!f || f.status !== "ready") {
+      return { ...EMPTY_PREFLIGHT, headline: "Belum ada dokumen" };
+    }
+    const items: PreflightIssue[] = [];
+    if (rangeInvalid) {
+      items.push({
+        id: "range",
+        severity: "error",
+        fixable: true,
+        label: "Rentang halaman tidak valid",
+        detail: 'Format rentang tidak sesuai — contoh benar: "1-3, 5".',
+      });
+    }
+    if (paperMismatch) {
+      items.push({
+        id: "paper",
+        severity: "warn",
+        fixable: false,
+        label: "Ukuran dokumen berbeda dari kertas",
+        detail: `Dokumen ${f.docLabel ?? ""} dibanding kertas ${paper.shortLabel} — mode "Sesuaikan Kertas" menskalakan otomatis.`,
+      });
+    }
+    if (contentOverflows) {
+      items.push({
+        id: "overflow",
+        severity: "warn",
+        fixable: true,
+        label: "Konten melebihi kertas",
+        detail: 'Skala 100% aktif — bagian di luar kertas terpotong. "Perbaiki Otomatis" mengaktifkan Sesuaikan Kertas.',
+      });
+    }
+    const sheets = selectedPages.length * settings.copies;
+    if (sheets > 150) {
+      items.push({
+        id: "cap",
+        severity: "error",
+        fixable: false,
+        label: "Melebihi batas 150 lembar",
+        detail: `${selectedPages.length} hal × ${settings.copies} salinan = ${sheets} lembar. Kurangi rentang halaman atau salinan.`,
+      });
+    }
+    const ink =
+      settings.colorMode === "grayscale"
+        ? settings.quality === "draft"
+          ? "rendah"
+          : "sedang"
+        : settings.quality === "high"
+          ? "tinggi"
+          : "sedang";
+    const errors = items.filter((i) => i.severity === "error").length;
+    const warns = items.filter((i) => i.severity === "warn").length;
+    const status = errors > 0 ? "error" : warns > 0 ? "warn" : "ok";
+    const headline =
+      status === "ok"
+        ? `Siap dicetak — ${selectedPages.length} hal × ${settings.copies} salinan`
+        : errors > 0
+          ? `${errors} masalah perlu diperbaiki`
+          : `${warns} hal perlu diperiksa`;
+    return {
+      status,
+      headline,
+      items,
+      ink,
+      sheets,
+      coveragePct: Math.min(100, Math.round((sheets / 150) * 100)),
+    };
+  }, [
+    activeFile,
+    rangeInvalid,
+    paperMismatch,
+    contentOverflows,
+    selectedPages.length,
+    settings.copies,
+    settings.colorMode,
+    settings.quality,
+    paper.shortLabel,
+  ]);
+
+  const preflight = photoMode ? photoPreflight : docPreflight;
+
+  /** One tap resolves everything resolvable (arrange / shrink / reset scale). */
+  const autoFixPreflight = useCallback(() => {
+    if (photoModeRef.current) {
+      const list = photoPlacementsRef.current;
+      const ps = photoSettingsRef.current;
+      const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+      const printW = paperW - 2 * ps.marginMm;
+      const printH = paperH - 2 * ps.marginMm;
+      const shrink: Array<{
+        id: string;
+        patch: Partial<PhotoPlacement>;
+      }> = [];
+      for (const p of list) {
+        const bb = placementBBox(p);
+        if (bb.w >= paperW - 0.1 && bb.h >= paperH - 0.1) continue;
+        const crossing =
+          bb.x < ps.marginMm - PHOTO_TOL ||
+          bb.y < ps.marginMm - PHOTO_TOL ||
+          bb.x + bb.w > paperW - ps.marginMm + PHOTO_TOL ||
+          bb.y + bb.h > paperH - ps.marginMm + PHOTO_TOL;
+        if (!crossing) continue;
+        const scale = Math.min(1, printW / bb.w, printH / bb.h);
+        if (scale >= 1) continue;
+        const w2 = Math.max(MIN_PHOTO_MM, p.wMm * scale);
+        const h2 = Math.max(MIN_PHOTO_MM, p.hMm * scale);
+        const cx = p.xMm + p.wMm / 2;
+        const cy = p.yMm + p.hMm / 2;
+        shrink.push({
+          id: p.id,
+          patch: { wMm: w2, hMm: h2, xMm: cx - w2 / 2, yMm: cy - h2 / 2 },
+        });
+      }
+      if (shrink.length > 0) updatePhotoPlacements(shrink);
+      autoArrangePhotos();
+      toast.success("Perbaikan otomatis selesai", {
+        description:
+          "Foto yang menempel tepi disesuaikan ke dalam margin dan lembar dirapikan berbaris.",
+      });
+      return;
+    }
+    const s = settingsRef.current;
+    const f = activeFileRef.current;
+    let fixed = 0;
+    if (
+      s.rangeMode === "custom" &&
+      !parsePageRange(s.rangeText, f?.pageCount ?? 1).valid
+    ) {
+      setSetting("rangeMode", "all");
+      fixed++;
+    }
+    if (f && f.docWidthMm && !f.continuous) {
+      const dims = paperDims(s.paperId, s.orientation);
+      const sc =
+        s.scaleMode === "fit"
+          ? Math.min(dims.wMm / f.docWidthMm, dims.hMm / (f.docHeightMm || 1))
+          : 1;
+      const overflows =
+        f.docWidthMm * sc > dims.wMm + 0.5 ||
+        (f.docHeightMm ?? 0) * sc > dims.hMm + 0.5;
+      if (overflows && s.scaleMode !== "fit") {
+        setSetting("scaleMode", "fit");
+        fixed++;
+      }
+    }
+    if (fixed > 0) {
+      toast.success("Perbaikan otomatis selesai", {
+        description: "Pengaturan cetak disesuaikan agar aman dicetak.",
+      });
+    } else {
+      toast.info("Tidak ada masalah yang bisa diperbaiki otomatis");
+    }
+  }, [updatePhotoPlacements, autoArrangePhotos, setSetting]);
+
+  // --------------------------------------------------------------------------
+  // "Bantu Saya Cetak" — guided wizard applies a complete configuration
+  // --------------------------------------------------------------------------
+
+  const applyGuidedChoice = useCallback(
+    (goal: GuidedGoal, paper: GuidedPaper, outcome: GuidedOutcome) => {
+      const paperId: PaperId = paper === "f4" ? "f4" : paper === "4r" ? "4r" : "a4";
+      const dims = paperDims(paperId, "portrait");
+      const margin = outcome === "hemat" ? 3 : 5;
+      const gap = outcome === "hemat" ? 2 : 4;
+      const quality =
+        outcome === "kualitas" ? "high" : outcome === "hemat" ? "draft" : "standard";
+      const readyImages = filesRef.current.filter(
+        (f) => f.kind === "image" && f.status === "ready" && !!f.url,
+      );
+      const distinct = new Set([
+        ...readyImages.map((f) => f.id),
+        ...photoPlacementsRef.current.map((p) => p.itemId),
+      ]).size;
+
+      if (goal === "doc") {
+        setPhotoModeState(false);
+        setPhotoSelectedIds([]);
+        setSettings((s) => ({
+          ...s,
+          paperId,
+          scaleMode: outcome === "asli" ? "original" : "fit",
+          colorMode: outcome === "hemat" ? "grayscale" : s.colorMode,
+          quality,
+          rangeMode: "all",
+          rangeText: "",
+        }));
+        toast.success("Pengaturan dokumen siap", {
+          description: `Kertas ${getPaper(paperId).shortLabel} • ${outcome === "asli" ? "ukuran asli" : "sesuaikan kertas"} • ${outcome === "hemat" ? "hemat tinta" : outcome === "kualitas" ? "kualitas terbaik" : "standar"} — tekan Cetak ke Epson.`,
+        });
+        return;
+      }
+
+      setSettings((s) => ({ ...s, paperId, quality }));
+      setPhotoModeState(true);
+
+      if (goal === "pas-foto") {
+        const presetId = paper === "4r" ? "pf-4x6" : "pf-3x4";
+        const preset = getPhotoPreset(presetId);
+        const cap = gridCapacityFor(
+          preset.wMm,
+          preset.hMm,
+          margin,
+          gap,
+          dims.wMm,
+          dims.hMm,
+        );
+        const perSheet = Math.min(
+          cap,
+          Math.max(6, outcome === "semua" ? distinct : 6),
+          MAX_PLACEMENTS,
+        );
+        setPhotoSettings((s) => ({
+          ...s,
+          presetId,
+          marginMm: margin,
+          gapMm: gap,
+          cutLines: true,
+          alignV: "center",
+          alignH: "center",
+          perSheet,
+        }));
+        arrangePhotoCopies(perSheet, {
+          dims: { wMm: preset.wMm, hMm: preset.hMm },
+          marginMm: margin,
+          gapMm: gap,
+          alignV: "center",
+          alignH: "center",
+          coverAll: outcome === "semua",
+          paperWmm: dims.wMm,
+          paperHmm: dims.hMm,
+        });
+        return;
+      }
+
+      if (goal === "banyak-foto") {
+        const candidates = [
+          { id: "p-4r", wMm: 102, hMm: 152 },
+          { id: "p-3r", wMm: 89, hMm: 127 },
+          { id: "p-2r", wMm: 64, hMm: 89 },
+        ];
+        let chosen = candidates[candidates.length - 1];
+        for (const c of candidates) {
+          chosen = c;
+          if (
+            gridCapacityFor(c.wMm, c.hMm, margin, gap, dims.wMm, dims.hMm) >=
+            Math.max(1, distinct)
+          ) {
+            break;
+          }
+        }
+        const cap = gridCapacityFor(
+          chosen.wMm,
+          chosen.hMm,
+          margin,
+          gap,
+          dims.wMm,
+          dims.hMm,
+        );
+        const perSheet = Math.min(cap, Math.max(2, distinct), MAX_PLACEMENTS);
+        setPhotoSettings((s) => ({
+          ...s,
+          presetId: chosen.id,
+          marginMm: margin,
+          gapMm: gap,
+          cutLines: true,
+          alignV: "center",
+          alignH: "center",
+          perSheet,
+        }));
+        arrangePhotoCopies(perSheet, {
+          dims: { wMm: chosen.wMm, hMm: chosen.hMm },
+          marginMm: margin,
+          gapMm: gap,
+          alignV: "center",
+          alignH: "center",
+          coverAll: true,
+          paperWmm: dims.wMm,
+          paperHmm: dims.hMm,
+        });
+        return;
+      }
+
+      // lembar-penuh — one photo covering the whole sheet (full bleed)
+      const itemId =
+        photoPlacementsRef.current[0]?.itemId ?? readyImages[0]?.id ?? null;
+      if (!itemId) {
+        toast.info("Unggah satu foto terlebih dahulu", {
+          description:
+            "Mode lembar penuh menempatkan satu foto memenuhi kertas.",
+        });
+        return;
+      }
+      setPhotoSettings((s) => ({
+        ...s,
+        presetId: "custom",
+        customWMm: dims.wMm,
+        customHMm: dims.hMm,
+        marginMm: 0,
+        gapMm: 0,
+        borderless: true,
+        cutLines: false,
+        alignV: "center",
+        alignH: "center",
+        perSheet: 1,
+      }));
+      const existing = photoPlacementsRef.current[0];
+      const pid = existing?.id ?? newPhotoId();
+      snapshotPhotoHistory();
+      setPhotoPlacements([
+        {
+          id: pid,
+          itemId,
+          xMm: 0,
+          yMm: 0,
+          wMm: dims.wMm,
+          hMm: dims.hMm,
+          rotation: 0,
+          fit: "cover",
+          cropX: 0,
+          cropY: 0,
+        },
+      ]);
+      setPhotoSelectedIds([pid]);
+      layoutTouchedRef.current = true;
+      toast.success("Foto memenuhi lembar", {
+        description: `Satu foto ${dims.wMm}×${dims.hMm} mm full bleed di ${getPaper(paperId).shortLabel} — geser "Potongan" di panel kanan untuk memilih bagian yang tercetak.`,
+      });
+    },
+    [arrangePhotoCopies, snapshotPhotoHistory],
+  );
+
+  // --------------------------------------------------------------------------
+  // Preset pekerjaan siap pakai ("Pekerjaan Cepat")
+  // --------------------------------------------------------------------------
+
+  const applyJobPreset = useCallback(
+    (id: JobPresetId) => {
+      switch (id) {
+        case "doc-hemat":
+        case "doc-kualitas":
+        case "ttd-scan": {
+          setPhotoModeState(false);
+          setPhotoSelectedIds([]);
+          if (id === "doc-hemat") {
+            setSettings((s) => ({
+              ...s,
+              colorMode: "grayscale",
+              quality: "draft",
+              scaleMode: "fit",
+            }));
+            toast.success("Preset Dokumen Hemat aktif", {
+              description: "Hitam-putih • Draf • sesuaikan kertas — paling irit tinta.",
+            });
+          } else if (id === "doc-kualitas") {
+            setSettings((s) => ({
+              ...s,
+              colorMode: "color",
+              quality: "high",
+              scaleMode: "fit",
+            }));
+            toast.success("Preset Dokumen Kualitas aktif", {
+              description: "Berwarna • Tinggi — untuk dokumen resmi & presentasi.",
+            });
+          } else {
+            setSettings((s) => ({
+              ...s,
+              paperId: "a4",
+              scaleMode: "original",
+              colorMode: "grayscale",
+              quality: "standard",
+            }));
+            toast.success("Preset Tanda Tangan aktif", {
+              description:
+                "Gambar dicetak ukuran asli di A4 — pastikan file scan sudah dipilih.",
+            });
+          }
+          return;
+        }
+        case "pasfoto-3x4":
+        case "pasfoto-4x6":
+        case "lamaran":
+        case "visa-paspor": {
+          const cfg = {
+            "pasfoto-3x4": { presetId: "pf-3x4", perSheet: 6 },
+            "pasfoto-4x6": { presetId: "pf-4x6", perSheet: 6 },
+            lamaran: { presetId: "pf-3x4", perSheet: 8 },
+            "visa-paspor": { presetId: "pf-35x45", perSheet: 8 },
+          }[id];
+          const preset = getPhotoPreset(cfg.presetId);
+          setPhotoModeState(true);
+          setPhotoSettings((s) => ({
+            ...s,
+            presetId: cfg.presetId,
+            marginMm: 4,
+            gapMm: 3,
+            cutLines: true,
+            alignV: "center",
+            alignH: "center",
+            perSheet: cfg.perSheet,
+          }));
+          arrangePhotoCopies(cfg.perSheet, {
+            dims: { wMm: preset.wMm, hMm: preset.hMm },
+            marginMm: 4,
+            gapMm: 3,
+            alignV: "center",
+            alignH: "center",
+            coverAll: true,
+          });
+          return;
+        }
+        case "kartu-identitas": {
+          setPhotoModeState(true);
+          setPhotoSettings((s) => ({
+            ...s,
+            presetId: "custom",
+            customWMm: 85.6,
+            customHMm: 54,
+            marginMm: 4,
+            gapMm: 4,
+            cutLines: true,
+            alignV: "center",
+            alignH: "center",
+            perSheet: 2,
+          }));
+          arrangePhotoCopies(2, {
+            dims: { wMm: 85.6, hMm: 54 },
+            marginMm: 4,
+            gapMm: 4,
+            alignV: "center",
+            alignH: "center",
+            coverAll: true,
+          });
+          return;
+        }
+        case "penuh-a4":
+        case "penuh-4r": {
+          const paperId: PaperId = id === "penuh-4r" ? "4r" : "a4";
+          const dims = paperDims(paperId, "portrait");
+          const itemId =
+            photoPlacementsRef.current[0]?.itemId ??
+            filesRef.current.find(
+              (f) => f.kind === "image" && f.status === "ready" && !!f.url,
+            )?.id ??
+            null;
+          if (!itemId) {
+            toast.info("Unggah foto terlebih dahulu", {
+              description: "Preset ini menempatkan satu foto memenuhi lembar.",
+            });
+            return;
+          }
+          setSettings((s) => ({ ...s, paperId }));
+          setPhotoModeState(true);
+          setPhotoSettings((s) => ({
+            ...s,
+            presetId: "custom",
+            customWMm: dims.wMm,
+            customHMm: dims.hMm,
+            marginMm: 0,
+            gapMm: 0,
+            borderless: true,
+            cutLines: false,
+            perSheet: 1,
+            alignV: "center",
+            alignH: "center",
+          }));
+          const existing = photoPlacementsRef.current[0];
+          const pid = existing?.id ?? newPhotoId();
+          snapshotPhotoHistory();
+          setPhotoPlacements([
+            {
+              id: pid,
+              itemId,
+              xMm: 0,
+              yMm: 0,
+              wMm: dims.wMm,
+              hMm: dims.hMm,
+              rotation: 0,
+              fit: "cover",
+              cropX: 0,
+              cropY: 0,
+            },
+          ]);
+          setPhotoSelectedIds([pid]);
+          layoutTouchedRef.current = true;
+          toast.success(`Foto penuh ${getPaper(paperId).shortLabel}`, {
+            description:
+              "Full bleed — tidak ada kertas kosong. Geser Potongan di panel kanan untuk memilih bagian yang tercetak.",
+          });
+          return;
+        }
+      }
+    },
+    [arrangePhotoCopies, snapshotPhotoHistory],
+  );
+
+  // --------------------------------------------------------------------------
+  // Export layout (PNG / PDF) — archive or hand to the customer
+  // --------------------------------------------------------------------------
+
+  const exportPhotoSheet = useCallback(async (format: "png" | "pdf") => {
+    const s = settingsRef.current;
+    const ps = photoSettingsRef.current;
+    const placements = photoPlacementsRef.current;
+    if (placements.length === 0) {
+      toast.info("Belum ada foto untuk diekspor.");
+      return;
+    }
+    const dims = paperDims(s.paperId, s.orientation);
+    const spec: PhotoSheetSpec = {
+      paperWmm: dims.wMm,
+      paperHmm: dims.hMm,
+      placements,
+      resolveImage: (itemId) =>
+        filesRef.current.find((f) => f.id === itemId && f.kind === "image")?.url ??
+        null,
+      colorMode: s.colorMode,
+      cutLines: ps.cutLines,
+      adjust: ps.adjust,
+    };
+    try {
+      const canvas = await renderPhotoSheetCanvas(spec);
+      const stamp = new Date().toISOString().slice(0, 10);
+      if (format === "png") {
+        const blob = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, "image/png"),
+        );
+        if (!blob) throw new Error("PNG gagal dibuat.");
+        downloadBlob(blob, `layout-foto-${stamp}.png`);
+      } else {
+        const { PDFDocument } = await import("pdf-lib");
+        const pdf = await PDFDocument.create();
+        const pngImage = await pdf.embedPng(canvas.toDataURL("image/png"));
+        const ptW = (dims.wMm / 25.4) * 72;
+        const ptH = (dims.hMm / 25.4) * 72;
+        const page = pdf.addPage([ptW, ptH]);
+        page.drawImage(pngImage, { x: 0, y: 0, width: ptW, height: ptH });
+        const bytes = await pdf.save();
+        downloadBlob(
+          new Blob([bytes as unknown as BlobPart], {
+            type: "application/pdf",
+          }),
+          `layout-foto-${stamp}.pdf`,
+        );
+      }
+      toast.success(`Layout diekspor (${format.toUpperCase()})`, {
+        description: "File terunduh — siap diarsipkan atau dikirim ke pelanggan.",
+      });
+    } catch (err) {
+      toast.error("Ekspor gagal", {
+        description: err instanceof Error ? err.message : "Kesalahan tidak diketahui.",
+      });
+    }
+  }, []);
+
+  // --------------------------------------------------------------------------
+  // Session auto-save & restore (photo mode)
+  // --------------------------------------------------------------------------
+
+  const saveSessionNow = useCallback(() => {
+    try {
+      if (!photoModeRef.current) return;
+      const placements = photoPlacementsRef.current;
+      if (placements.length === 0) return;
+      const images = filesRef.current.filter(
+        (f) => f.kind === "image" && f.status === "ready" && !!f.bytes,
+      );
+      if (images.length === 0) return;
+      let total = 0;
+      const savedFiles: SavedSessionFile[] = [];
+      for (const f of images) {
+        if (!f.bytes || f.bytes.length > SESSION_MAX_FILE_BYTES) return;
+        total += f.bytes.length;
+        if (total > SESSION_MAX_TOTAL_BYTES) return;
+        let b64 = sessionB64Cache.get(f.id);
+        if (!b64) {
+          b64 = toBase64(f.bytes);
+          sessionB64Cache.set(f.id, b64);
+        }
+        savedFiles.push({ id: f.id, name: f.name, ext: f.ext, mime: f.mime, bytesB64: b64 });
+      }
+      const payload: SavedSession = {
+        v: 1,
+        savedAt: Date.now(),
+        settings: settingsRef.current,
+        photoSettings: photoSettingsRef.current,
+        placements,
+        files: savedFiles,
+      };
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify(payload));
+    } catch {
+      /* quota exceeded / private mode — auto-save is best-effort */
+    }
+  }, []);
+
+  const restoreSession = useCallback(
+    (saved: SavedSession) => {
+      const restored: LoadedFile[] = saved.files.map((f) => ({
+        id: f.id,
+        name: f.name,
+        ext: f.ext,
+        sizeBytes: Math.round((f.bytesB64.length * 3) / 4),
+        kind: "image",
+        mime: f.mime,
+        bytes: b64ToBytes(f.bytesB64),
+        url: null,
+        status: "loading",
+        pageCount: null,
+        docWidthMm: null,
+        docHeightMm: null,
+        docLabel: null,
+      }));
+      setFiles(restored);
+      for (const f of restored) {
+        inspectImage(f)
+          .then((patch) => patchFile(f.id, patch))
+          .catch(() =>
+            patchFile(f.id, {
+              status: "error",
+              error: "Gambar sesi tidak dapat dibaca.",
+            }),
+          );
+      }
+      setSettings(saved.settings);
+      setPhotoSettings(saved.photoSettings);
+      setPhotoPlacements(saved.placements.map((p) => ({ ...p })));
+      setPhotoSelectedIds([]);
+      setPhotoModeState(true);
+      setActiveId(restored[0]?.id ?? null);
+      setPage(1);
+      photoHistoryPastRef.current = [];
+      photoHistoryFutureRef.current = [];
+      setPhotoHistoryTick((t) => t + 1);
+      toast.success("Sesi dipulihkan", {
+        description: `${saved.placements.length} foto, ukuran, dan pengaturan dikembalikan seperti sebelumnya.`,
+      });
+    },
+    [patchFile],
+  );
+
+  const restoreSessionRef = useRef(restoreSession);
+  restoreSessionRef.current = restoreSession;
+
+  // mount-once: offer to restore the last session.
+  // Deferred a tick: sonner only renders toasts published AFTER its <Toaster>
+  // mounts, so firing during hydration would swallow the offer entirely.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      let raw: string | null = null;
+      try {
+        raw = window.localStorage.getItem(SESSION_KEY);
+      } catch {
+        raw = null;
+      }
+      if (!raw) return;
+      let saved: SavedSession | null = null;
+      try {
+        saved = JSON.parse(raw) as SavedSession;
+      } catch {
+        saved = null;
+      }
+      if (
+        !saved ||
+        saved.v !== 1 ||
+        !Array.isArray(saved.placements) ||
+        saved.placements.length === 0 ||
+        !Array.isArray(saved.files)
+      ) {
+        return;
+      }
+      if ((Date.now() - saved.savedAt) / 3_600_000 > SESSION_MAX_AGE_H) {
+        try {
+          window.localStorage.removeItem(SESSION_KEY);
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      const snap = saved;
+      const when = new Date(snap.savedAt).toLocaleTimeString("id-ID", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      toast.info("Sesi cetak terakhir ditemukan", {
+        description: `${snap.placements.length} foto tersimpan otomatis (${when}). Pulihkan untuk melanjutkan pekerjaan tadi.`,
+        duration: 15_000,
+        action: {
+          label: "Pulihkan",
+          onClick: () => restoreSessionRef.current(snap),
+        },
+        cancel: {
+          label: "Abaikan",
+          onClick: () => {
+            try {
+              window.localStorage.removeItem(SESSION_KEY);
+            } catch {
+              /* ignore */
+            }
+          },
+        },
+      });
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  // debounced auto-save whenever the photo session changes
+  useEffect(() => {
+    if (!photoMode || photoPlacements.length === 0) return;
+    const t = window.setTimeout(() => saveSessionNow(), 1200);
+    return () => window.clearTimeout(t);
+  }, [photoMode, photoPlacements, photoSettings, settings, saveSessionNow]);
+
+  // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y — undo & redo the photo layout
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      const k = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && k === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redoPhoto();
+        else undoPhoto();
+      } else if ((e.ctrlKey || e.metaKey) && k === "y") {
+        e.preventDefault();
+        redoPhoto();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [undoPhoto, redoPhoto]);
 
   // -- photo print execution ---------------------------------------------------
   const printPhotoLayout = useCallback(async () => {
@@ -1901,6 +3043,22 @@ export function usePrintStation() {
     addPhotoFiles,
     replacePhotoItem,
     cropPhotoItem,
+    // undo / redo (photo layout)
+    undoPhoto,
+    redoPhoto,
+    beginPhotoHistory,
+    endPhotoHistory,
+    canUndoPhoto: photoHistoryPastRef.current.length > 0,
+    canRedoPhoto: photoHistoryFutureRef.current.length > 0,
+    // optimize / preflight / guided / presets / export / ui level
+    optimizePhotoLayout,
+    preflight,
+    autoFixPreflight,
+    applyGuidedChoice,
+    applyJobPreset,
+    exportPhotoSheet,
+    uiLevel,
+    setUiLevel,
     // document accessors for renderers
     getPdfDoc: loadPdfDoc,
     getDocxRender: renderDocx,

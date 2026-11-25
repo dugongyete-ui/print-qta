@@ -55,6 +55,9 @@ interface PhotoStageData {
   onCropPhoto: (placementId: string) => void;
   /** "Penuhi" — enlarge one photo until it covers the entire sheet. */
   onCoverPhoto: (placementId: string) => void;
+  /** Open / close one undo step around a drag / resize gesture. */
+  onBeginHistory: () => void;
+  onEndHistory: () => void;
 }
 
 interface PreviewStageProps {
@@ -498,6 +501,8 @@ export function PreviewStage(props: PreviewStageProps) {
                   onChangePhoto={photo.onChangePhoto}
                   onCropPhoto={photo.onCropPhoto}
                   onCoverPhoto={photo.onCoverPhoto}
+                  onBeginHistory={photo.onBeginHistory}
+                  onEndHistory={photo.onEndHistory}
                 />
               </div>
             </div>

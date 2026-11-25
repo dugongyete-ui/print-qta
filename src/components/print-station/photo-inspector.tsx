@@ -13,21 +13,24 @@ import {
   AlignStartVertical,
   Copy,
   Crop,
+  Download,
   Eraser,
   ImagePlus,
   LayoutGrid,
   Maximize2,
   Minus,
   Plus,
+  Redo2,
   Repeat,
   RotateCcw,
   Rows3,
   Sparkles,
   Trash2,
+  Undo2,
   Wand2,
 } from "lucide-react";
 import { formatBytes } from "@/lib/paper";
-import type { PhotoAlign } from "@/hooks/use-print-station";
+import type { PhotoAlign, UiLevel } from "@/hooks/use-print-station";
 import {
   AUTO_ENHANCE_ADJUST,
   NEUTRAL_ADJUST,
@@ -254,6 +257,17 @@ interface PhotoInspectorProps {
   /** "Penuhi Lembar" — enlarge the selection until it covers the entire
    * sheet (full-bleed, no empty paper left). */
   onCoverSheet: (ids: string[]) => void;
+  /** "Optimalkan Otomatis" — the primary one-tap arrangement pass. */
+  onOptimize: () => void;
+  /** Export the current sheet as a PNG / PDF file. */
+  onExportSheet: (format: "png" | "pdf") => void;
+  /** Undo / redo the layout (Ctrl+Z companions). */
+  onUndoPhoto: () => void;
+  onRedoPhoto: () => void;
+  canUndoPhoto: boolean;
+  canRedoPhoto: boolean;
+  /** "Mode Pemula" hides the advanced controls. */
+  uiLevel: UiLevel;
 }
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
@@ -290,6 +304,13 @@ export function PhotoInspector({
   onChangePhoto,
   onCropPhoto,
   onCoverSheet,
+  onOptimize,
+  onExportSheet,
+  onUndoPhoto,
+  onRedoPhoto,
+  canUndoPhoto,
+  canRedoPhoto,
+  uiLevel,
 }: PhotoInspectorProps) {
   const selectedCount = selectedIds.length;
   // "Jumlah Foto" lives in the shared photo settings so this control, photo
@@ -328,6 +349,8 @@ export function PhotoInspector({
   const pctFmt = (v: number) => `${Math.round(v * 100)}%`;
 
   const scopeLabel = selected ? "menerapkan ke foto terpilih" : "menerapkan ke semua foto";
+  /** Mode Lanjutan shows everything; Mode Pemula keeps only the essentials. */
+  const adv = uiLevel === "advanced";
 
   return (
     <>
@@ -405,14 +428,16 @@ export function PhotoInspector({
           </div>
         ) : null}
 
-        <Row label="Kunci Rasio Aspek">
-          <Switch
-            checked={settings.lockAspect}
-            onCheckedChange={(v) => onSetting({ lockAspect: v })}
-            aria-label="Kunci rasio aspek foto"
-            className="data-[state=checked]:bg-[#003399]"
-          />
-        </Row>
+        {adv ? (
+          <Row label="Kunci Rasio Aspek">
+            <Switch
+              checked={settings.lockAspect}
+              onCheckedChange={(v) => onSetting({ lockAspect: v })}
+              aria-label="Kunci rasio aspek foto"
+              className="data-[state=checked]:bg-[#003399]"
+            />
+          </Row>
+        ) : null}
       </Section>
 
       {/* Posisi & Ukuran (Word-like) */}
@@ -481,69 +506,75 @@ export function PhotoInspector({
                 ? "Semua foto terpilih diperbesar bersama sampai kertas penuh — posisi antar foto tetap."
                 : "Foto diperbesar sampai tepi kertas — atur bagian yang tercetak lewat slider Geser Potongan di bawah."}
             </p>
-            <div className="flex gap-2">
-              <NumField
-                label="Posisi X"
-                value={selected.xMm}
-                min={0}
-                max={paperWmm}
-                onCommit={(v) => onUpdateSelected({ xMm: v })}
-              />
-              <NumField
-                label="Posisi Y"
-                value={selected.yMm}
-                min={0}
-                max={paperHmm}
-                onCommit={(v) => onUpdateSelected({ yMm: v })}
-              />
-            </div>
-            <div className="flex gap-2">
-              <NumField
-                label="Lebar"
-                value={selected.wMm}
-                min={10}
-                max={paperWmm * 2}
-                onCommit={(v) =>
-                  onUpdateSelected(
-                    settings.lockAspect
-                      ? {
-                          wMm: v,
-                          hMm: (v * selected.hMm) / selected.wMm,
-                        }
-                      : { wMm: v },
-                  )
-                }
-              />
-              <NumField
-                label="Tinggi"
-                value={selected.hMm}
-                min={10}
-                max={paperHmm * 2}
-                onCommit={(v) =>
-                  onUpdateSelected(
-                    settings.lockAspect
-                      ? {
-                          hMm: v,
-                          wMm: (v * selected.wMm) / selected.hMm,
-                        }
-                      : { hMm: v },
-                  )
-                }
-              />
-            </div>
-            <Row label="Rotasi">
-              <Segmented
-                value={String(selected.rotation)}
-                onChange={(v) => onUpdateSelected({ rotation: Number(v) })}
-                options={[
-                  { value: "0", label: "0°" },
-                  { value: "90", label: "90°" },
-                  { value: "180", label: "180°" },
-                  { value: "270", label: "270°" },
-                ]}
-                title="Rotasi foto"
-              />
-            </Row>
+            {adv ? (
+              <>
+                <div className="flex gap-2">
+                  <NumField
+                    label="Posisi X"
+                    value={selected.xMm}
+                    min={0}
+                    max={paperWmm}
+                    onCommit={(v) => onUpdateSelected({ xMm: v })}
+                  />
+                  <NumField
+                    label="Posisi Y"
+                    value={selected.yMm}
+                    min={0}
+                    max={paperHmm}
+                    onCommit={(v) => onUpdateSelected({ yMm: v })}
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <NumField
+                    label="Lebar"
+                    value={selected.wMm}
+                    min={10}
+                    max={paperWmm * 2}
+                    onCommit={(v) =>
+                      onUpdateSelected(
+                        settings.lockAspect
+                          ? {
+                              wMm: v,
+                              hMm: (v * selected.hMm) / selected.wMm,
+                            }
+                          : { wMm: v },
+                      )
+                    }
+                  />
+                  <NumField
+                    label="Tinggi"
+                    value={selected.hMm}
+                    min={10}
+                    max={paperHmm * 2}
+                    onCommit={(v) =>
+                      onUpdateSelected(
+                        settings.lockAspect
+                          ? {
+                              hMm: v,
+                              wMm: (v * selected.wMm) / selected.hMm,
+                            }
+                          : { hMm: v },
+                      )
+                    }
+                  />
+                </div>
+              </>
+            ) : null}
+            {adv ? (
+              <Row label="Rotasi">
+                <Segmented
+                  value={String(selected.rotation)}
+                  onChange={(v) => onUpdateSelected({ rotation: Number(v) })}
+                  options={[
+                    { value: "0", label: "0°" },
+                    { value: "90", label: "90°" },
+                    { value: "180", label: "180°" },
+                    { value: "270", label: "270°" },
+                  ]}
+                  title="Rotasi foto"
+                />
+              </Row>
+            ) : null}
             <Row label="Isi Bingkai">
               <Segmented
                 value={selected.fit}
@@ -555,7 +586,7 @@ export function PhotoInspector({
                 title="Cara foto mengisi bingkai"
               />
             </Row>
-            {selected.fit === "cover" ? (
+            {adv && selected.fit === "cover" ? (
               <div className="flex flex-col gap-2 rounded-md border border-[#E5E7EB] bg-[#F9FAFB] px-3 py-2.5">
                 <span className="font-mono text-[9.5px] uppercase tracking-[0.06em] text-[#6B7280]">
                   Geser Potongan (potong penuhi)
@@ -588,26 +619,28 @@ export function PhotoInspector({
                 </button>
               </div>
             ) : null}
-            <div className="grid grid-cols-6 gap-1">
-              <IconBtn title="Rata kiri" onClick={() => onAlign("left")} disabled={!selected}>
-                <AlignStartVertical size={13} strokeWidth={1.5} />
-              </IconBtn>
-              <IconBtn title="Rata tengah horizontal" onClick={() => onAlign("centerX")} disabled={!selected}>
-                <AlignCenterVertical size={13} strokeWidth={1.5} />
-              </IconBtn>
-              <IconBtn title="Rata kanan" onClick={() => onAlign("right")} disabled={!selected}>
-                <AlignEndVertical size={13} strokeWidth={1.5} />
-              </IconBtn>
-              <IconBtn title="Rata atas" onClick={() => onAlign("top")} disabled={!selected}>
-                <AlignStartHorizontal size={13} strokeWidth={1.5} />
-              </IconBtn>
-              <IconBtn title="Rata tengah vertikal" onClick={() => onAlign("centerY")} disabled={!selected}>
-                <AlignCenterHorizontal size={13} strokeWidth={1.5} />
-              </IconBtn>
-              <IconBtn title="Rata bawah" onClick={() => onAlign("bottom")} disabled={!selected}>
-                <AlignEndHorizontal size={13} strokeWidth={1.5} />
-              </IconBtn>
-            </div>
+            {adv ? (
+              <div className="grid grid-cols-6 gap-1">
+                <IconBtn title="Rata kiri" onClick={() => onAlign("left")} disabled={!selected}>
+                  <AlignStartVertical size={13} strokeWidth={1.5} />
+                </IconBtn>
+                <IconBtn title="Rata tengah horizontal" onClick={() => onAlign("centerX")} disabled={!selected}>
+                  <AlignCenterVertical size={13} strokeWidth={1.5} />
+                </IconBtn>
+                <IconBtn title="Rata kanan" onClick={() => onAlign("right")} disabled={!selected}>
+                  <AlignEndVertical size={13} strokeWidth={1.5} />
+                </IconBtn>
+                <IconBtn title="Rata atas" onClick={() => onAlign("top")} disabled={!selected}>
+                  <AlignStartHorizontal size={13} strokeWidth={1.5} />
+                </IconBtn>
+                <IconBtn title="Rata tengah vertikal" onClick={() => onAlign("centerY")} disabled={!selected}>
+                  <AlignCenterHorizontal size={13} strokeWidth={1.5} />
+                </IconBtn>
+                <IconBtn title="Rata bawah" onClick={() => onAlign("bottom")} disabled={!selected}>
+                  <AlignEndHorizontal size={13} strokeWidth={1.5} />
+                </IconBtn>
+              </div>
+            ) : null}
             {selectedCount > 1 ? (
               <p className="font-mono text-[9.5px] leading-relaxed text-[#003399]">
                 {selectedCount} foto terpilih — tombol rata menggerakkan seluruh
@@ -634,11 +667,13 @@ export function PhotoInspector({
                 Hapus{selectedCount > 1 ? ` (${selectedCount})` : ""}
               </button>
             </div>
-            <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
-              Geser langsung di lembar • Ctrl/Shift+klik = pilih banyak • tarik
-              di area kosong = seleksi kotak • panah = geser semua terpilih (1
-              mm • Shift+panah = 10 mm) • Ctrl+A = pilih semua
-            </p>
+            {adv ? (
+              <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+                Geser langsung di lembar • Ctrl/Shift+klik = pilih banyak • tarik
+                di area kosong = seleksi kotak • panah = geser semua terpilih (1
+                mm • Shift+panah = 10 mm) • Ctrl+A = pilih semua
+              </p>
+            ) : null}
           </>
         ) : (
           <p className="text-[12px] leading-relaxed text-[#6B7280]">
@@ -708,6 +743,19 @@ export function PhotoInspector({
 
       {/* Susun & Lembar */}
       <Section title="Susun & Lembar">
+        {/* Primary one-tap pass — bundling every auto behavior behind ONE
+            button so a first-time operator never has to guess which of
+            Susun / Rapikan / Isi Penuh to press. */}
+        <button
+          type="button"
+          data-testid="optimize-btn"
+          onClick={onOptimize}
+          disabled={placements.length === 0}
+          className="flex h-9 w-full items-center justify-center gap-1.5 rounded-md bg-[#003399] text-[12px] font-semibold text-white transition-colors hover:bg-[#002673] disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          <Wand2 size={13} strokeWidth={1.8} />
+          Optimalkan Otomatis
+        </button>
         <Row label="Jumlah Foto">
           <div className="inline-flex items-center rounded-md border border-[#E5E7EB]">
             <button
@@ -757,30 +805,34 @@ export function PhotoInspector({
           Mengubah jumlah langsung mengejajarkan {n} foto di lembar — semua
           foto terunggah dibungkus grid seimbang sesuai posisi di bawah.
         </p>
-        <Row label="Jajarkan Vertikal">
-          <Segmented
-            value={settings.alignV}
-            onChange={setAlignV}
-            options={[
-              { value: "top", label: "Atas" },
-              { value: "center", label: "Tengah" },
-              { value: "bottom", label: "Bawah" },
-            ]}
-            title="Posisi grid di dalam area cetak — atas, tengah, bawah"
-          />
-        </Row>
-        <Row label="Jajarkan Horizontal">
-          <Segmented
-            value={settings.alignH}
-            onChange={setAlignH}
-            options={[
-              { value: "left", label: "Kiri" },
-              { value: "center", label: "Tengah" },
-              { value: "right", label: "Kanan" },
-            ]}
-            title="Posisi grid horizontal di dalam area cetak"
-          />
-        </Row>
+        {adv ? (
+          <Row label="Jajarkan Vertikal">
+            <Segmented
+              value={settings.alignV}
+              onChange={setAlignV}
+              options={[
+                { value: "top", label: "Atas" },
+                { value: "center", label: "Tengah" },
+                { value: "bottom", label: "Bawah" },
+              ]}
+              title="Posisi grid di dalam area cetak — atas, tengah, bawah"
+            />
+          </Row>
+        ) : null}
+        {adv ? (
+          <Row label="Jajarkan Horizontal">
+            <Segmented
+              value={settings.alignH}
+              onChange={setAlignH}
+              options={[
+                { value: "left", label: "Kiri" },
+                { value: "center", label: "Tengah" },
+                { value: "right", label: "Kanan" },
+              ]}
+              title="Posisi grid horizontal di dalam area cetak"
+            />
+          </Row>
+        ) : null}
         <div className="grid grid-cols-3 gap-1">
           <button
             type="button"
@@ -813,47 +865,102 @@ export function PhotoInspector({
             Rapikan
           </button>
         </div>
+        {/* Undo / redo the layout + file export — experimentation safety net. */}
+        <div className="grid grid-cols-4 gap-1">
+          <button
+            type="button"
+            data-testid="undo-btn"
+            onClick={onUndoPhoto}
+            disabled={!canUndoPhoto}
+            title="Batalkan perubahan terakhir (Ctrl+Z)"
+            aria-label="Batalkan perubahan terakhir"
+            className="flex h-8 items-center justify-center rounded-md border border-[#E5E7EB] bg-white text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+          >
+            <Undo2 size={13} strokeWidth={1.5} />
+          </button>
+          <button
+            type="button"
+            data-testid="redo-btn"
+            onClick={onRedoPhoto}
+            disabled={!canRedoPhoto}
+            title="Ulangi perubahan (Ctrl+Shift+Z)"
+            aria-label="Ulangi perubahan"
+            className="flex h-8 items-center justify-center rounded-md border border-[#E5E7EB] bg-white text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+          >
+            <Redo2 size={13} strokeWidth={1.5} />
+          </button>
+          <button
+            type="button"
+            data-testid="export-pdf"
+            onClick={() => onExportSheet("pdf")}
+            disabled={placements.length === 0}
+            title="Unduh lembar ini sebagai file PDF"
+            aria-label="Ekspor lembar sebagai PDF"
+            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#E5E7EB] bg-white text-[10.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+          >
+            <Download size={12} strokeWidth={1.5} />
+            PDF
+          </button>
+          <button
+            type="button"
+            data-testid="export-png"
+            onClick={() => onExportSheet("png")}
+            disabled={placements.length === 0}
+            title="Unduh lembar ini sebagai gambar PNG"
+            aria-label="Ekspor lembar sebagai PNG"
+            className="flex h-8 items-center justify-center gap-1 rounded-md border border-[#E5E7EB] bg-white text-[10.5px] font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:opacity-30"
+          >
+            <Download size={12} strokeWidth={1.5} />
+            PNG
+          </button>
+        </div>
         <p className="font-mono text-[10px] tabular-nums text-[#6B7280]">
           Kapasitas lembar: {capSafe} foto • {preset.short} • margin {settings.marginMm} mm
         </p>
-        <div className="flex gap-2">
-          <NumField
-            label="Margin (mm)"
-            value={settings.marginMm}
-            min={0}
-            max={30}
-            onCommit={setMargin}
-          />
-          <NumField
-            label="Jarak Antar Foto (mm)"
-            value={settings.gapMm}
-            min={0}
-            max={20}
-            onCommit={setGap}
-          />
-        </div>
-        <Row label="Tanpa Pinggiran">
-          <Switch
-            checked={settings.borderless}
-            onCheckedChange={onBorderless}
-            aria-label="Cetak tanpa pinggiran"
-            className="data-[state=checked]:bg-[#003399]"
-          />
-        </Row>
+        {adv ? (
+          <div className="flex gap-2">
+            <NumField
+              label="Margin (mm)"
+              value={settings.marginMm}
+              min={0}
+              max={30}
+              onCommit={setMargin}
+            />
+            <NumField
+              label="Jarak Antar Foto (mm)"
+              value={settings.gapMm}
+              min={0}
+              max={20}
+              onCommit={setGap}
+            />
+          </div>
+        ) : null}
+        {adv ? (
+          <Row label="Tanpa Pinggiran">
+            <Switch
+              checked={settings.borderless}
+              onCheckedChange={onBorderless}
+              aria-label="Cetak tanpa pinggiran"
+              className="data-[state=checked]:bg-[#003399]"
+            />
+          </Row>
+        ) : null}
         {settings.borderless ? (
           <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
             Margin diset 0 mm — foto menjalar ke tepi kertas. Aktifkan juga
             Borderless pada dialog driver Epson agar hasil tanpa garis putih.
           </p>
         ) : null}
-        <Row label="Garis Potong">
-          <Switch
-            checked={settings.cutLines}
-            onCheckedChange={(v) => onSetting({ cutLines: v })}
-            aria-label="Tampilkan garis potong"
-            className="data-[state=checked]:bg-[#003399]"
-          />
-        </Row>
+        {adv ? (
+          <Row label="Garis Potong">
+            <Switch
+              checked={settings.cutLines}
+              onCheckedChange={(v) => onSetting({ cutLines: v })}
+              aria-label="Tampilkan garis potong"
+              className="data-[state=checked]:bg-[#003399]"
+            />
+          </Row>
+        ) : null}
         {beyondMargin ? (
           <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
             Ada foto melewati garis margin — bagian di luar kertas otomatis

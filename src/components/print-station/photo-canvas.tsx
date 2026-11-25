@@ -61,6 +61,9 @@ interface PhotoCanvasProps {
   /** "Penuhi" — enlarge this photo until it covers the entire sheet
    * (full-bleed: overflow is cropped exactly at the paper edge). */
   onCoverPhoto: (placementId: string) => void;
+  /** Open one undo step for a whole drag / resize gesture. */
+  onBeginHistory: () => void;
+  onEndHistory: () => void;
 }
 
 type Gesture =
@@ -195,6 +198,8 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     onChangePhoto,
     onCropPhoto,
     onCoverPhoto,
+    onBeginHistory,
+    onEndHistory,
   } = props;
 
   const gestureRef = useRef<Gesture | null>(null);
@@ -247,6 +252,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     ) => {
       e.stopPropagation();
       e.preventDefault();
+      onBeginHistory();
       const origins = new Map<string, { x: number; y: number }>();
       for (const p of placementsRef.current) {
         if (ids.includes(p.id)) origins.set(p.id, { x: p.xMm, y: p.yMm });
@@ -319,6 +325,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
       };
       const onUp = () => {
         detachWindowListeners(onMove, onUp);
+        onEndHistory();
         const cur = gestureRef.current;
         if (
           cur &&
@@ -333,7 +340,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
       };
       attachWindowListeners(onMove, onUp);
     },
-    [onUpdateMany, onSelect, marginMm, endGesture],
+    [onUpdateMany, onSelect, marginMm, endGesture, onBeginHistory, onEndHistory],
   );
 
   const beginMove = useCallback(
@@ -372,6 +379,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     (p: PhotoPlacement, dir: HandleDir, e: React.PointerEvent) => {
       e.stopPropagation();
       e.preventDefault();
+      onBeginHistory();
       gestureRef.current = {
         kind: "resize",
         id: p.id,
@@ -391,11 +399,12 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
       };
       const onUp = () => {
         detachWindowListeners(onMove, onUp);
+        onEndHistory();
         endGesture();
       };
       attachWindowListeners(onMove, onUp);
     },
-    [onUpdateMany, endGesture],
+    [onUpdateMany, endGesture, onBeginHistory, onEndHistory],
   );
 
   // -- marquee lasso on the empty sheet --------------------------------------
