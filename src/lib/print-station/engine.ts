@@ -302,11 +302,21 @@ export async function renderPhotoSheetCanvas(
     }
 
     if (cutLines) {
-      ctx.strokeStyle = "#AEB4BC";
-      ctx.lineWidth = Math.max(1, 0.15 * mmToPx);
-      ctx.setLineDash([1.2 * mmToPx, 1.2 * mmToPx]);
-      ctx.strokeRect(-drawW / 2, -drawH / 2, drawW, drawH);
-      ctx.setLineDash([]);
+      // A placement whose rotated bbox covers the whole sheet is intentional
+      // full-bleed ("Penuhi Lembar") — a dashed cut line at the paper edge
+      // would print as dots along the border, so skip it there.
+      const ca = Math.abs(Math.cos((p.rotation * Math.PI) / 180));
+      const sa = Math.abs(Math.sin((p.rotation * Math.PI) / 180));
+      const bbW = p.wMm * ca + p.hMm * sa;
+      const bbH = p.wMm * sa + p.hMm * ca;
+      const fullBleed = bbW >= paperWmm - 0.1 && bbH >= paperHmm - 0.1;
+      if (!fullBleed) {
+        ctx.strokeStyle = "#AEB4BC";
+        ctx.lineWidth = Math.max(1, 0.15 * mmToPx);
+        ctx.setLineDash([1.2 * mmToPx, 1.2 * mmToPx]);
+        ctx.strokeRect(-drawW / 2, -drawH / 2, drawW, drawH);
+        ctx.setLineDash([]);
+      }
     }
     ctx.restore();
   }

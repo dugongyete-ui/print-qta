@@ -113,6 +113,9 @@ export interface PhotoPanelData {
   onChangePhoto: (placementId: string, file: File) => void;
   /** "Potong Foto" — open the crop dialog for the slot's source image. */
   onCropPhoto: (placementId: string) => void;
+  /** "Penuhi Lembar" — enlarge the selection until it covers the entire
+   * sheet (full-bleed, no empty paper left). */
+  onCoverSheet: (ids: string[]) => void;
 }
 
 function ColorQualitySection({
@@ -361,6 +364,7 @@ function SidebarContent({
               onAddPhotoFiles={photo.onAddPhotoFiles}
               onChangePhoto={photo.onChangePhoto}
               onCropPhoto={photo.onCropPhoto}
+              onCoverSheet={photo.onCoverSheet}
             />
             <ColorQualitySection settings={settings} onSetting={onSetting} />
             <Section title="Salinan">

@@ -1,0 +1,766 @@
+     1→"use client";
+     2→
+     3→// Word-like photo sheet editor.
+     4→// Free drag + 8-handle resize on a true-to-scale paper canvas, with smart
+     5→// snapping to the printable margins, page center and sibling photo edges.
+     6→// Word-like multi-selection: Ctrl/Shift+click, marquee lasso on the empty
+     7→// sheet and a tap-to-add touch mode — dragging any selected photo moves the
+     8→// WHOLE selection as a group. Geometry is millimeter-based (k = px/mm scale)
+     9→// so the editor, the preview and the print rasterizer stay in agreement.
+    10→
+    11→import { useCallback, useEffect, useRef, useState } from "react";
+    12→import { Copy, Crop, ImagePlus, Repeat, RotateCw, Trash2 } from "lucide-react";
+    13→import { MIN_PHOTO_MM, type LoadedFile, type PhotoAdjustments, type PhotoPlacement } from "@/lib/print-station/types";
+    14→import { photoAdjustFilterCss } from "@/lib/print-station/engine";
+    15→
+    16→type HandleDir = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+    17→
+    18→const HANDLE_DIRS: HandleDir[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+    19→
+    20→const HANDLE_CURSOR: Record<HandleDir, string> = {
+    21→  nw: "nwse-resize",
+    22→  se: "nwse-resize",
+    23→  ne: "nesw-resize",
+    24→  sw: "nesw-resize",
+    25→  n: "ns-resize",
+    26→  s: "ns-resize",
+    27→  e: "ew-resize",
+    28→  w: "ew-resize",
+    29→};
+    30→
+    31→interface PhotoCanvasProps {
+    32→  paperWmm: number;
+    33→  paperHmm: number;
+    34→  /** px per mm of the preview stage */
+    35→  k: number;
+    36→  placements: PhotoPlacement[];
+    37→  files: LoadedFile[];
+    38→  /** All selected placement ids — the last one is the primary (handles/badge). */
+    39→  selectedIds: string[];
+    40→  marginMm: number;
+    41→  lockAspect: boolean;
+    42→  cutLines: boolean;
+    43→  grayscale: boolean;
+    44→  /** Sheet-wide adjustments — must match the print raster exactly. */
+    45→  adjust?: PhotoAdjustments;
+    46→  /** Touch-friendly multi-select: tapping a photo adds it to the selection. */
+    47→  multiMode: boolean;
+    48→  onSelect: (id: string | null, additive?: boolean) => void;
+    49→  /** Replace the whole selection (marquee-lasso result). */
+    50→  onSelectIds: (ids: string[]) => void;
+    51→  onSelectAll: () => void;
+    52→  onUpdateMany: (
+    53→    updates: Array<{ id: string; patch: Partial<PhotoPlacement> }>,
+    54→  ) => void;
+    55→  onRemove: (ids: string[]) => void;
+    56→  onDuplicate: (ids: string[]) => void;
+    57→  /** "Ubah Foto" — swap the source image of this slot in place. */
+    58→  onChangePhoto: (placementId: string, file: File) => void;
+    59→  /** "Potong Foto" — open the crop dialog for this slot's source image. */
+    60→  onCropPhoto: (placementId: string) => void;
+    61→}
+    62→
+    63→type Gesture =
+    64→  | {
+    65→      kind: "move";
+    66→      ids: string[];
+    67→      grabId: string;
+    68→      px0: number;
+    69→      py0: number;
+    70→      origins: Map<string, { x: number; y: number }>;
+    71→      /** Set when the grab may still become a tap-to-toggle (touch mode). */
+    72→      tapToggleId: string | null;
+    73→      movedPx: number;
+    74→    }
+    75→  | {
+    76→      kind: "resize";
+    77→      id: string;
+    78→      dir: HandleDir;
+    79→      px0: number;
+    80→      py0: number;
+    81→      orig: PhotoPlacement;
+    82→    }
+    83→  | {
+    84→      kind: "marquee";
+    85→      rect: DOMRect;
+    86→      x0: number;
+    87→      y0: number;
+    88→      px0: number;
+    89→      py0: number;
+    90→      moved: boolean;
+    91→    };
+    92→
+    93→/** Visual bounding box of a placement (accounts for 90-step rotation). */
+    94→function bboxOf(p: PhotoPlacement): { x: number; y: number; w: number; h: number } {
+    95→  const rot = ((Math.round(p.rotation / 90) * 90) % 360 + 360) % 360;
+    96→  const swapped = rot === 90 || rot === 270;
+    97→  const w = swapped ? p.hMm : p.wMm;
+    98→  const h = swapped ? p.wMm : p.hMm;
+    99→  const cx = p.xMm + p.wMm / 2;
+   100→  const cy = p.yMm + p.hMm / 2;
+   101→  return { x: cx - w / 2, y: cy - h / 2, w, h };
+   102→}
+   103→
+   104→/** Resize with center-based rotation: the opposite anchor stays fixed. */
+   105→function resizePlacement(
+   106→  orig: PhotoPlacement,
+   107→  dir: HandleDir,
+   108→  dxMm: number,
+   109→  dyMm: number,
+   110→  lockAspect: boolean,
+   111→): { xMm: number; yMm: number; wMm: number; hMm: number } {
+   112→  const theta = (orig.rotation * Math.PI) / 180;
+   113→  const c = Math.cos(theta);
+   114→  const s = Math.sin(theta);
+   115→  // screen delta -> placement-local delta (rotate by -theta)
+   116→  const lx = c * dxMm + s * dyMm;
+   117→  const ly = -s * dxMm + c * dyMm;
+   118→
+   119→  let dw = 0;
+   120→  let dh = 0;
+   121→  if (dir.includes("e")) dw = lx;
+   122→  if (dir.includes("w")) dw = -lx;
+   123→  if (dir.includes("s")) dh = ly;
+   124→  if (dir.includes("n")) dh = -ly;
+   125→
+   126→  const ratio = orig.hMm / orig.wMm;
+   127→  if (lockAspect && dw !== 0 && dh !== 0) {
+   128→    if (Math.abs(dw) / orig.wMm > Math.abs(dh) / orig.hMm) dh = dw * ratio;
+   129→    else dw = dh / ratio;
+   130→  }
+   131→  let w2 = Math.max(MIN_PHOTO_MM, orig.wMm + dw);
+   132→  let h2 = Math.max(MIN_PHOTO_MM, orig.hMm + dh);
+   133→  if (lockAspect && dw !== 0 && dh !== 0) {
+   134→    if (Math.abs(dw) / orig.wMm >= Math.abs(dh) / orig.hMm) h2 = w2 * ratio;
+   135→    else w2 = h2 / ratio;
+   136→  }
+   137→
+   138→  // anchor = opposite handle point in local (center-relative) coords
+   139→  const fx = dir.includes("w") ? orig.wMm / 2 : dir.includes("e") ? -orig.wMm / 2 : 0;
+   140→  const fy = dir.includes("n") ? orig.hMm / 2 : dir.includes("s") ? -orig.hMm / 2 : 0;
+   141→  const cx0 = orig.xMm + orig.wMm / 2;
+   142→  const cy0 = orig.yMm + orig.hMm / 2;
+   143→  const fpx = cx0 + (c * fx - s * fy);
+   144→  const fpy = cy0 + (s * fx + c * fy);
+   145→  const nfx = dir.includes("w") ? w2 / 2 : dir.includes("e") ? -w2 / 2 : 0;
+   146→  const nfy = dir.includes("n") ? h2 / 2 : dir.includes("s") ? -h2 / 2 : 0;
+   147→  const ncx = fpx - (c * nfx - s * nfy);
+   148→  const ncy = fpy - (s * nfx + c * nfy);
+   149→  return { xMm: ncx - w2 / 2, yMm: ncy - h2 / 2, wMm: w2, hMm: h2 };
+   150→}
+   151→
+   152→function attachWindowListeners(
+   153→  onMove: (ev: PointerEvent) => void,
+   154→  onUp: (ev?: Event) => void,
+   155→): void {
+   156→  window.addEventListener("pointermove", onMove);
+   157→  window.addEventListener("pointerup", onUp);
+   158→  window.addEventListener("pointercancel", onUp);
+   159→  window.addEventListener("blur", onUp);
+   160→}
+   161→
+   162→function detachWindowListeners(
+   163→  onMove: (ev: PointerEvent) => void,
+   164→  onUp: (ev?: Event) => void,
+   165→): void {
+   166→  window.removeEventListener("pointermove", onMove);
+   167→  window.removeEventListener("pointerup", onUp);
+   168→  window.removeEventListener("pointercancel", onUp);
+   169→  window.removeEventListener("blur", onUp);
+   170→}
+   171→
+   172→export function PhotoCanvas(props: PhotoCanvasProps) {
+   173→  const {
+   174→    paperWmm,
+   175→    paperHmm,
+   176→    k,
+   177→    placements,
+   178→    files,
+   179→    selectedIds,
+   180→    marginMm,
+   181→    lockAspect,
+   182→    cutLines,
+   183→    grayscale,
+   184→    adjust,
+   185→    multiMode,
+   186→    onSelect,
+   187→    onSelectIds,
+   188→    onSelectAll,
+   189→    onUpdateMany,
+   190→    onRemove,
+   191→    onDuplicate,
+   192→    onChangePhoto,
+   193→    onCropPhoto,
+   194→  } = props;
+   195→
+   196→  const gestureRef = useRef<Gesture | null>(null);
+   197→  const placementsRef = useRef(placements);
+   198→  const kRef = useRef(k);
+   199→  const lockRef = useRef(lockAspect);
+   200→  const paperRef = useRef({ wMm: paperWmm, hMm: paperHmm });
+   201→  const selectedIdsRef = useRef(selectedIds);
+   202→  const multiModeRef = useRef(multiMode);
+   203→  // Sync latest props into refs after commit — gesture/keyboard handlers read
+   204→  // them at event time (never during render).
+   205→  useEffect(() => {
+   206→    placementsRef.current = placements;
+   207→    kRef.current = k;
+   208→    lockRef.current = lockAspect;
+   209→    paperRef.current = { wMm: paperWmm, hMm: paperHmm };
+   210→    selectedIdsRef.current = selectedIds;
+   211→    multiModeRef.current = multiMode;
+   212→  }, [placements, k, lockAspect, paperWmm, paperHmm, selectedIds, multiMode]);
+   213→  const [guides, setGuides] = useState<{ v: number | null; h: number | null }>({
+   214→    v: null,
+   215→    h: null,
+   216→  });
+   217→  const [marquee, setMarquee] = useState<{
+   218→    x: number;
+   219→    y: number;
+   220→    w: number;
+   221→    h: number;
+   222→  } | null>(null);
+   223→
+   224→  const primaryId = selectedIds.length > 0 ? selectedIds[selectedIds.length - 1] : null;
+   225→
+   226→  const sheetW = Math.round(paperWmm * k);
+   227→  const sheetH = Math.round(paperHmm * k);
+   228→
+   229→  // -- pointer gesture engine ------------------------------------------------
+   230→  const endGesture = useCallback(() => {
+   231→    gestureRef.current = null;
+   232→    setGuides({ v: null, h: null });
+   233→    setMarquee(null);
+   234→  }, []);
+   235→
+   236→  /** Group move: every id in `ids` translates by the same mm delta. */
+   237→  const beginMoveGesture = useCallback(
+   238→    (
+   239→      ids: string[],
+   240→      grabId: string,
+   241→      e: React.PointerEvent,
+   242→      tapToggleId: string | null,
+   243→    ) => {
+   244→      e.stopPropagation();
+   245→      e.preventDefault();
+   246→      const origins = new Map<string, { x: number; y: number }>();
+   247→      for (const p of placementsRef.current) {
+   248→        if (ids.includes(p.id)) origins.set(p.id, { x: p.xMm, y: p.yMm });
+   249→      }
+   250→      gestureRef.current = {
+   251→        kind: "move",
+   252→        ids,
+   253→        grabId,
+   254→        px0: e.clientX,
+   255→        py0: e.clientY,
+   256→        origins,
+   257→        tapToggleId,
+   258→        movedPx: 0,
+   259→      };
+   260→      const onMove = (ev: PointerEvent) => {
+   261→        const cur = gestureRef.current;
+   262→        if (!cur || cur.kind !== "move") return;
+   263→        const dxPx = ev.clientX - cur.px0;
+   264→        const dyPx = ev.clientY - cur.py0;
+   265→        cur.movedPx = Math.max(cur.movedPx, Math.abs(dxPx), Math.abs(dyPx));
+   266→        const scale = kRef.current || 1;
+   267→        let dx = dxPx / scale;
+   268→        let dy = dyPx / scale;
+   269→        // smart snapping (Word-like guides) — anchored on the grabbed photo
+   270→        const { wMm: paperW, hMm: paperH } = paperRef.current;
+   271→        const tolerance = 6 / scale;
+   272→        const me = placementsRef.current.find((p) => p.id === cur.grabId);
+   273→        const grabOrigin = cur.origins.get(cur.grabId);
+   274→        if (me && grabOrigin) {
+   275→          const moved = { ...me, xMm: grabOrigin.x + dx, yMm: grabOrigin.y + dy };
+   276→          const bb = bboxOf(moved);
+   277→          const tx: number[] = [0, marginMm, paperW - marginMm, paperW / 2, paperW];
+   278→          const ty: number[] = [0, marginMm, paperH - marginMm, paperH / 2, paperH];
+   279→          for (const o of placementsRef.current) {
+   280→            if (cur.ids.includes(o.id)) continue;
+   281→            const ob = bboxOf(o);
+   282→            tx.push(ob.x, ob.x + ob.w, ob.x + ob.w / 2);
+   283→            ty.push(ob.y, ob.y + ob.h, ob.y + ob.h / 2);
+   284→          }
+   285→          let bestX: { d: number; t: number } | null = null;
+   286→          let bestY: { d: number; t: number } | null = null;
+   287→          for (const t of tx) {
+   288→            for (const e2 of [bb.x, bb.x + bb.w, bb.x + bb.w / 2]) {
+   289→              const d = t - e2;
+   290→              if (Math.abs(d) <= tolerance && (!bestX || Math.abs(d) < Math.abs(bestX.d))) {
+   291→                bestX = { d, t };
+   292→              }
+   293→            }
+   294→          }
+   295→          for (const t of ty) {
+   296→            for (const e2 of [bb.y, bb.y + bb.h, bb.y + bb.h / 2]) {
+   297→              const d = t - e2;
+   298→              if (Math.abs(d) <= tolerance && (!bestY || Math.abs(d) < Math.abs(bestY.d))) {
+   299→                bestY = { d, t };
+   300→              }
+   301→            }
+   302→          }
+   303→          if (bestX) dx += bestX.d;
+   304→          if (bestY) dy += bestY.d;
+   305→          setGuides({ v: bestX ? bestX.t : null, h: bestY ? bestY.t : null });
+   306→        }
+   307→        onUpdateMany(
+   308→          cur.ids
+   309→            .filter((id) => cur.origins.has(id))
+   310→            .map((id) => {
+   311→              const o = cur.origins.get(id)!;
+   312→              return { id, patch: { xMm: o.x + dx, yMm: o.y + dy } };
+   313→            }),
+   314→        );
+   315→      };
+   316→      const onUp = () => {
+   317→        detachWindowListeners(onMove, onUp);
+   318→        const cur = gestureRef.current;
+   319→        if (
+   320→          cur &&
+   321→          cur.kind === "move" &&
+   322→          cur.tapToggleId &&
+   323→          cur.movedPx < 4
+   324→        ) {
+   325→          // touch "Pilih Banyak": a tap (no drag) toggles the photo in
+   326→          onSelect(cur.tapToggleId, true);
+   327→        }
+   328→        endGesture();
+   329→      };
+   330→      attachWindowListeners(onMove, onUp);
+   331→    },
+   332→    [onUpdateMany, onSelect, marginMm, endGesture],
+   333→  );
+   334→
+   335→  const beginMove = useCallback(
+   336→    (p: PhotoPlacement, e: React.PointerEvent) => {
+   337→      const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+   338→      if (additive) {
+   339→        // Ctrl/Shift+click toggles into the multi-selection (Word-like);
+   340→        // no drag so building a group never accidentally moves photos.
+   341→        e.stopPropagation();
+   342→        e.preventDefault();
+   343→        onSelect(p.id, true);
+   344→        return;
+   345→      }
+   346→      const sel = selectedIdsRef.current;
+   347→      if (multiModeRef.current) {
+   348→        if (sel.includes(p.id)) {
+   349→          beginMoveGesture([...sel], p.id, e, null);
+   350→        } else {
+   351→          // tap adds it to the selection, drag moves just this photo
+   352→          beginMoveGesture([p.id], p.id, e, p.id);
+   353→        }
+   354→        return;
+   355→      }
+   356→      if (sel.includes(p.id)) {
+   357→        // already in the (possibly multi) selection — drag moves the group
+   358→        beginMoveGesture([...sel], p.id, e, null);
+   359→      } else {
+   360→        onSelect(p.id);
+   361→        beginMoveGesture([p.id], p.id, e, null);
+   362→      }
+   363→    },
+   364→    [beginMoveGesture, onSelect],
+   365→  );
+   366→
+   367→  const beginResize = useCallback(
+   368→    (p: PhotoPlacement, dir: HandleDir, e: React.PointerEvent) => {
+   369→      e.stopPropagation();
+   370→      e.preventDefault();
+   371→      gestureRef.current = {
+   372→        kind: "resize",
+   373→        id: p.id,
+   374→        dir,
+   375→        px0: e.clientX,
+   376→        py0: e.clientY,
+   377→        orig: p,
+   378→      };
+   379→      const onMove = (ev: PointerEvent) => {
+   380→        const cur = gestureRef.current;
+   381→        if (!cur || cur.kind !== "resize") return;
+   382→        const scale = kRef.current || 1;
+   383→        const dx = (ev.clientX - cur.px0) / scale;
+   384→        const dy = (ev.clientY - cur.py0) / scale;
+   385→        const r = resizePlacement(cur.orig, cur.dir, dx, dy, lockRef.current);
+   386→        onUpdateMany([{ id: cur.id, patch: r }]);
+   387→      };
+   388→      const onUp = () => {
+   389→        detachWindowListeners(onMove, onUp);
+   390→        endGesture();
+   391→      };
+   392→      attachWindowListeners(onMove, onUp);
+   393→    },
+   394→    [onUpdateMany, endGesture],
+   395→  );
+   396→
+   397→  // -- marquee lasso on the empty sheet --------------------------------------
+   398→  const onSheetPointerDown = useCallback(
+   399→    (e: React.PointerEvent<HTMLDivElement>) => {
+   400→      if (e.target !== e.currentTarget) return;
+   401→      if (e.pointerType === "mouse" && e.button !== 0) return;
+   402→      const rect = e.currentTarget.getBoundingClientRect();
+   403→      const scale = kRef.current || 1;
+   404→      const x0 = (e.clientX - rect.left) / scale;
+   405→      const y0 = (e.clientY - rect.top) / scale;
+   406→      gestureRef.current = {
+   407→        kind: "marquee",
+   408→        rect,
+   409→        x0,
+   410→        y0,
+   411→        px0: e.clientX,
+   412→        py0: e.clientY,
+   413→        moved: false,
+   414→      };
+   415→      const onMove = (ev: PointerEvent) => {
+   416→        const cur = gestureRef.current;
+   417→        if (!cur || cur.kind !== "marquee") return;
+   418→        if (
+   419→          Math.abs(ev.clientX - cur.px0) > 4 ||
+   420→          Math.abs(ev.clientY - cur.py0) > 4
+   421→        ) {
+   422→          cur.moved = true;
+   423→        }
+   424→        const x = (ev.clientX - cur.rect.left) / scale;
+   425→        const y = (ev.clientY - cur.rect.top) / scale;
+   426→        setMarquee({
+   427→          x: Math.min(x, cur.x0),
+   428→          y: Math.min(y, cur.y0),
+   429→          w: Math.abs(x - cur.x0),
+   430→          h: Math.abs(y - cur.y0),
+   431→        });
+   432→      };
+   433→      const onUp = (ev?: Event) => {
+   434→        detachWindowListeners(onMove, onUp);
+   435→        const cur = gestureRef.current;
+   436→        if (cur && cur.kind === "marquee" && cur.moved && ev) {
+   437→          const pe = ev as PointerEvent;
+   438→          const x1 = (pe.clientX - cur.rect.left) / scale;
+   439→          const y1 = (pe.clientY - cur.rect.top) / scale;
+   440→          const rx = Math.min(x1, cur.x0);
+   441→          const ry = Math.min(y1, cur.y0);
+   442→          const rw = Math.abs(x1 - cur.x0);
+   443→          const rh = Math.abs(y1 - cur.y0);
+   444→          const ids = placementsRef.current
+   445→            .filter((p) => {
+   446→              const bb = bboxOf(p);
+   447→              return (
+   448→                bb.x < rx + rw &&
+   449→                bb.x + bb.w > rx &&
+   450→                bb.y < ry + rh &&
+   451→                bb.y + bb.h > ry
+   452→              );
+   453→            })
+   454→            .map((p) => p.id);
+   455→          onSelectIds(ids);
+   456→        } else if (cur && cur.kind === "marquee" && !cur.moved) {
+   457→          // plain click on the empty sheet — clear the selection
+   458→          onSelect(null);
+   459→        }
+   460→        endGesture();
+   461→      };
+   462→      attachWindowListeners(onMove, onUp);
+   463→    },
+   464→    [onSelectIds, onSelect, endGesture],
+   465→  );
+   466→
+   467→  // -- keyboard: group nudge / delete / duplicate / select-all ---------------
+   468→  useEffect(() => {
+   469→    if (placements.length === 0) return;
+   470→    const handler = (e: KeyboardEvent) => {
+   471→      const t = e.target as HTMLElement | null;
+   472→      if (
+   473→        t &&
+   474→        (t.tagName === "INPUT" ||
+   475→          t.tagName === "TEXTAREA" ||
+   476→          t.tagName === "SELECT" ||
+   477→          t.isContentEditable)
+   478→      ) {
+   479→        return;
+   480→      }
+   481→      const sel = selectedIdsRef.current;
+   482→      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+   483→        e.preventDefault();
+   484→        onSelectAll();
+   485→        return;
+   486→      }
+   487→      if (sel.length === 0) return;
+   488→      const step = e.shiftKey ? 10 : 1;
+   489→      if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+   490→        e.preventDefault();
+   491→        const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+   492→        const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+   493→        onUpdateMany(
+   494→          placementsRef.current
+   495→            .filter((p) => sel.includes(p.id))
+   496→            .map((p) => ({ id: p.id, patch: { xMm: p.xMm + dx, yMm: p.yMm + dy } })),
+   497→        );
+   498→      } else if (e.key === "Delete" || e.key === "Backspace") {
+   499→        e.preventDefault();
+   500→        onRemove(sel);
+   501→      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+   502→        e.preventDefault();
+   503→        onDuplicate(sel);
+   504→      } else if (e.key === "Escape") {
+   505→        onSelect(null);
+   506→      }
+   507→    };
+   508→    window.addEventListener("keydown", handler);
+   509→    return () => window.removeEventListener("keydown", handler);
+   510→  }, [placements.length, onSelectAll, onUpdateMany, onRemove, onDuplicate, onSelect]);
+   511→
+   512→  const urlFor = (itemId: string) =>
+   513→    files.find((f) => f.id === itemId && f.kind === "image")?.url ?? null;
+   514→
+   515→  // Same filter string the print rasterizer feeds to ctx.filter — the preview
+   516→  // and the paper are pixel-identical by construction.
+   517→  const adjustCss = photoAdjustFilterCss(adjust);
+   518→  const imgFilter =
+   519→    adjustCss !== "none" || grayscale
+   520→      ? `${adjustCss === "none" ? "" : adjustCss}${grayscale ? " grayscale(1)" : ""}`.trim()
+   521→      : undefined;
+   522→
+   523→  return (
+   524→    <div
+   525→      data-testid="photo-sheet"
+   526→      className="relative shrink-0 cursor-default bg-white touch-none select-none"
+   527→      style={{ width: sheetW, height: sheetH }}
+   528→      onPointerDown={onSheetPointerDown}
+   529→      role="application"
+   530→      aria-label={`Lembar foto ${paperWmm}×${paperHmm} mm — ${placements.length} foto`}
+   531→    >
+   532→      {/* printable-area guide (Epson minimum margin) */}
+   533→      <div
+   534→        className="pointer-events-none absolute border border-dashed border-[#D8DCE2]"
+   535→        style={{
+   536→          left: marginMm * k,
+   537→          top: marginMm * k,
+   538→          width: Math.max(0, (paperWmm - 2 * marginMm) * k),
+   539→          height: Math.max(0, (paperHmm - 2 * marginMm) * k),
+   540→        }}
+   541→        title={`Area cetak — margin ${marginMm} mm`}
+   542→        aria-hidden="true"
+   543→      />
+   544→
+   545→      {/* empty sheet hint */}
+   546→      {placements.length === 0 ? (
+   547→        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
+   548→          <ImagePlus size={22} strokeWidth={1.5} className="text-[#9CA3AF]" />
+   549→          <p className="max-w-[220px] text-[12.5px] leading-relaxed text-[#6B7280]">
+   550→            Unggah foto PNG/JPG untuk mulai menyusun lembar cetak
+   551→          </p>
+   552→          <p className="font-mono text-[10px] text-[#9CA3AF]">
+   553→            ukuran foto diatur pada panel kanan
+   554→          </p>
+   555→        </div>
+   556→      ) : null}
+   557→
+   558→      {/* placements */}
+   559→      {placements.map((p, i) => {
+   560→        const url = urlFor(p.itemId);
+   561→        const selected = selectedIds.includes(p.id);
+   562→        const isPrimary = p.id === primaryId;
+   563→        return (
+   564→          <div
+   565→            key={p.id}
+   566→            data-photo-id={p.id}
+   567→            data-testid={`photo-${i + 1}`}
+   568→            onPointerDown={(e) => beginMove(p, e)}
+   569→            className={`absolute cursor-move ${
+   570→              selected
+   571→                ? isPrimary
+   572→                  ? "outline outline-1 outline-[#003399]"
+   573→                  : "outline outline-1 outline-dashed outline-[#003399]/60"
+   574→                : "outline outline-1 outline-transparent hover:outline-[#B6BCC6]"
+   575→            }`}
+   576→            style={{
+   577→              left: p.xMm * k,
+   578→              top: p.yMm * k,
+   579→              width: p.wMm * k,
+   580→              height: p.hMm * k,
+   581→              transform: `rotate(${p.rotation}deg)`,
+   582→              // Selected photos (and their floating toolbar / handles) paint
+   583→              // above sibling placements — DOM order alone would bury the
+   584→              // toolbar under later-row photos.
+   585→              zIndex: selected ? (isPrimary ? 30 : 20) : undefined,
+   586→            }}
+   587→            role="button"
+   588→            tabIndex={0}
+   589→            aria-label={`Foto ${i + 1} — ${Math.round(p.wMm)} × ${Math.round(p.hMm)} mm`}
+   590→          >
+   591→            {url ? (
+   592→              <img
+   593→                src={url}
+   594→                alt=""
+   595→                draggable={false}
+   596→                style={{
+   597→                  objectFit: p.fit === "cover" ? "cover" : "contain",
+   598→                  objectPosition: `${50 + (p.cropX ?? 0)}% ${50 + (p.cropY ?? 0)}%`,
+   599→                  filter: imgFilter,
+   600→                }}
+   601→              />
+   602→            ) : (
+   603→              <div className="h-full w-full bg-[#F3F4F6]" />
+   604→            )}
+   605→
+   606→            {/* cut guide (matches dashed cut lines in the print raster) */}
+   607→            {cutLines ? (
+   608→              <div
+   609→                className="pointer-events-none absolute inset-0 z-[5] border border-dashed border-[#AEB4BC]"
+   610→                aria-hidden="true"
+   611→              />
+   612→            ) : null}
+   613→
+   614→            {/* Quick-action toolbar (single primary selection) — "Ubah Foto"
+   615→                swaps the source image in place; rotate / duplicate / delete
+   616→                mirror the inspector so the common fixes live on the photo. */}
+   617→            {isPrimary && selectedIds.length === 1 ? (
+   618→              <div
+   619→                data-testid="photo-toolbar"
+   620→                className="absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white p-0.5 shadow-[0_2px_8px_rgba(17,24,39,0.16)]"
+   621→                style={
+   622→                  p.yMm * k > 40
+   623→                    ? { bottom: "100%", marginBottom: 6 }
+   624→                    : { top: "100%", marginTop: 6 }
+   625→                }
+   626→                onPointerDown={(e) => e.stopPropagation()}
+   627→              >
+   628→                <label
+   629→                  className="flex h-7 cursor-pointer items-center gap-1 whitespace-nowrap rounded px-2 text-[11px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+   630→                  title="Ganti foto di slot ini dengan file lain — posisi & ukuran tetap"
+   631→                >
+   632→                  <input
+   633→                    type="file"
+   634→                    accept="image/png,image/jpeg"
+   635→                    className="sr-only"
+   636→                    aria-label={`Ubah foto ${i + 1}`}
+   637→                    onChange={(e) => {
+   638→                      const f = e.target.files?.[0];
+   639→                      if (f) onChangePhoto(p.id, f);
+   640→                      e.target.value = "";
+   641→                    }}
+   642→                  />
+   643→                  <Repeat size={11} strokeWidth={2} aria-hidden="true" />
+   644→                  Ubah Foto
+   645→                </label>
+   646→                <button
+   647→                  type="button"
+   648→                  title="Potong foto — buang bagian yang tidak perlu (mis. status bar screenshot)"
+   649→                  aria-label={`Potong foto ${i + 1}`}
+   650→                  onClick={() => onCropPhoto(p.id)}
+   651→                  className="flex h-7 items-center gap-1 whitespace-nowrap rounded px-2 text-[11px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+   652→                >
+   653→                  <Crop size={11} strokeWidth={2} aria-hidden="true" />
+   654→                  Potong
+   655→                </button>
+   656→                <span className="mx-0.5 h-4 w-px bg-[#E5E7EB]" aria-hidden="true" />
+   657→                <button
+   658→                  type="button"
+   659→                  title="Putar 90° searah jarum jam"
+   660→                  aria-label={`Putar foto ${i + 1}`}
+   661→                  onClick={() =>
+   662→                    onUpdateMany([
+   663→                      { id: p.id, patch: { rotation: p.rotation + 90 } },
+   664→                    ])
+   665→                  }
+   666→                  className="flex h-7 w-7 items-center justify-center rounded text-[#374151] transition-colors hover:bg-[#F3F4F6]"
+   667→                >
+   668→                  <RotateCw size={12} strokeWidth={1.5} />
+   669→                </button>
+   670→                <button
+   671→                  type="button"
+   672→                  title="Duplikat foto ini"
+   673→                  aria-label={`Duplikat foto ${i + 1}`}
+   674→                  onClick={() => onDuplicate([p.id])}
+   675→                  className="flex h-7 w-7 items-center justify-center rounded text-[#374151] transition-colors hover:bg-[#F3F4F6]"
+   676→                >
+   677→                  <Copy size={12} strokeWidth={1.5} />
+   678→                </button>
+   679→                <button
+   680→                  type="button"
+   681→                  title="Hapus foto ini dari lembar"
+   682→                  aria-label={`Hapus foto ${i + 1}`}
+   683→                  onClick={() => onRemove([p.id])}
+   684→                  className="flex h-7 w-7 items-center justify-center rounded text-[#9CA3AF] transition-colors hover:bg-[#FEF2F2] hover:text-[#DC2626]"
+   685→                >
+   686→                  <Trash2 size={12} strokeWidth={1.5} />
+   687→                </button>
+   688→              </div>
+   689→            ) : null}
+   690→
+   691→            {/* Word-like resize handles (primary photo only) */}
+   692→            {isPrimary
+   693→              ? HANDLE_DIRS.map((dir) => {
+   694→                  const isCorner = dir.length === 2;
+   695→                  const hx = dir.includes("w") ? 0 : dir.includes("e") ? 100 : 50;
+   696→                  const hy = dir.includes("n") ? 0 : dir.includes("s") ? 100 : 50;
+   697→                  const size = isCorner
+   698→                    ? { width: 12, height: 12 }
+   699→                    : dir === "n" || dir === "s"
+   700→                      ? { width: 20, height: 8 }
+   701→                      : { width: 8, height: 20 };
+   702→                  return (
+   703→                    <div
+   704→                      key={dir}
+   705→                      data-handle={dir}
+   706→                      onPointerDown={(e) => beginResize(p, dir, e)}
+   707→                      className="absolute z-10 rounded-[1px] border border-[#003399] bg-white after:absolute after:-inset-1.5 after:content-['']"
+   708→                      style={{
+   709→                        left: `${hx}%`,
+   710→                        top: `${hy}%`,
+   711→                        width: size.width,
+   712→                        height: size.height,
+   713→                        transform: "translate(-50%, -50%)",
+   714→                        cursor: HANDLE_CURSOR[dir],
+   715→                      }}
+   716→                      aria-label={`Ubah ukuran ${dir}`}
+   717→                    />
+   718→                  );
+   719→                })
+   720→              : null}
+   721→
+   722→            {/* live dimension badge (primary photo only) */}
+   723→            {isPrimary ? (
+   724→              <div className="pointer-events-none absolute left-1/2 top-full z-10 mt-1 -translate-x-1/2 whitespace-nowrap rounded border border-[#E5E7EB] bg-white px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-[#374151] shadow-[0_1px_2px_rgba(17,24,39,0.06)]">
+   725→                {selectedIds.length > 1
+   726→                  ? `${selectedIds.length} foto • geser bersama`
+   727→                  : `${Math.round(p.wMm * 10) / 10} × ${Math.round(p.hMm * 10) / 10} mm`}
+   728→              </div>
+   729→            ) : null}
+   730→          </div>
+   731→        );
+   732→      })}
+   733→
+   734→      {/* marquee lasso rectangle */}
+   735→      {marquee ? (
+   736→        <div
+   737→          className="pointer-events-none absolute z-20 border border-dashed border-[#003399]/70 bg-[#003399]/5"
+   738→          style={{
+   739→            left: marquee.x * k,
+   740→            top: marquee.y * k,
+   741→            width: marquee.w * k,
+   742→            height: marquee.h * k,
+   743→          }}
+   744→          aria-hidden="true"
+   745→        />
+   746→      ) : null}
+   747→
+   748→      {/* smart snap guides */}
+   749→      {guides.v !== null ? (
+   750→        <div
+   751→          className="pointer-events-none absolute inset-y-0 z-20 w-px bg-[#003399]/55"
+   752→          style={{ left: guides.v * k }}
+   753→          aria-hidden="true"
+   754→        />
+   755→      ) : null}
+   756→      {guides.h !== null ? (
+   757→        <div
+   758→          className="pointer-events-none absolute inset-x-0 z-20 h-px bg-[#003399]/55"
+   759→          style={{ top: guides.h * k }}
+   760→          aria-hidden="true"
+   761→        />
+   762→      ) : null}
+   763→    </div>
+   764→  );
+   765→}
+   766→

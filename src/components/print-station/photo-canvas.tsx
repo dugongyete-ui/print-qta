@@ -9,7 +9,7 @@
 // so the editor, the preview and the print rasterizer stay in agreement.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Copy, Crop, ImagePlus, Repeat, RotateCw, Trash2 } from "lucide-react";
+import { Copy, Crop, ImagePlus, Maximize2, Repeat, RotateCw, Trash2 } from "lucide-react";
 import { MIN_PHOTO_MM, type LoadedFile, type PhotoAdjustments, type PhotoPlacement } from "@/lib/print-station/types";
 import { photoAdjustFilterCss } from "@/lib/print-station/engine";
 
@@ -58,6 +58,9 @@ interface PhotoCanvasProps {
   onChangePhoto: (placementId: string, file: File) => void;
   /** "Potong Foto" — open the crop dialog for this slot's source image. */
   onCropPhoto: (placementId: string) => void;
+  /** "Penuhi" — enlarge this photo until it covers the entire sheet
+   * (full-bleed: overflow is cropped exactly at the paper edge). */
+  onCoverPhoto: (placementId: string) => void;
 }
 
 type Gesture =
@@ -191,6 +194,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
     onDuplicate,
     onChangePhoto,
     onCropPhoto,
+    onCoverPhoto,
   } = props;
 
   const gestureRef = useRef<Gesture | null>(null);
@@ -560,6 +564,19 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
         const url = urlFor(p.itemId);
         const selected = selectedIds.includes(p.id);
         const isPrimary = p.id === primaryId;
+        // Floating-toolbar / badge placement: prefer outside the frame, fall
+        // back inside for edge-to-edge photos (the sheet host clips overflow,
+        // so a toolbar hanging off the paper would be invisible).
+        const topPx = p.yMm * k;
+        const bottomPx = (p.yMm + p.hMm) * k;
+        const toolAbove = topPx >= 40;
+        const toolBelow = !toolAbove && sheetH - bottomPx >= 40;
+        const badgeBelow = sheetH - bottomPx >= 24;
+        const badgeAbove = !badgeBelow && topPx >= 24;
+        // Intentional full-bleed: skip the dashed cut guide — it would sit
+        // exactly on the paper border (and print as dots there).
+        const fullBleed =
+          p.wMm >= paperWmm - 0.1 && p.hMm >= paperHmm - 0.1;
         return (
           <div
             key={p.id}
@@ -604,7 +621,7 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
             )}
 
             {/* cut guide (matches dashed cut lines in the print raster) */}
-            {cutLines ? (
+            {cutLines && !fullBleed ? (
               <div
                 className="pointer-events-none absolute inset-0 z-[5] border border-dashed border-[#AEB4BC]"
                 aria-hidden="true"
@@ -619,9 +636,11 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
                 data-testid="photo-toolbar"
                 className="absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-[#E5E7EB] bg-white p-0.5 shadow-[0_2px_8px_rgba(17,24,39,0.16)]"
                 style={
-                  p.yMm * k > 40
+                  toolAbove
                     ? { bottom: "100%", marginBottom: 6 }
-                    : { top: "100%", marginTop: 6 }
+                    : toolBelow
+                      ? { top: "100%", marginTop: 6 }
+                      : { top: 8 }
                 }
                 onPointerDown={(e) => e.stopPropagation()}
               >
@@ -652,6 +671,16 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
                 >
                   <Crop size={11} strokeWidth={2} aria-hidden="true" />
                   Potong
+                </button>
+                <button
+                  type="button"
+                  title="Perbesar sampai penuhi lembar — tanpa sisa kertas kosong (full bleed)"
+                  aria-label={`Penuhi lembar dengan foto ${i + 1}`}
+                  onClick={() => onCoverPhoto(p.id)}
+                  className="flex h-7 items-center gap-1 whitespace-nowrap rounded px-2 text-[11px] font-semibold text-[#003399] transition-colors hover:bg-[#003399]/5"
+                >
+                  <Maximize2 size={11} strokeWidth={2} aria-hidden="true" />
+                  Penuhi
                 </button>
                 <span className="mx-0.5 h-4 w-px bg-[#E5E7EB]" aria-hidden="true" />
                 <button
@@ -721,7 +750,15 @@ export function PhotoCanvas(props: PhotoCanvasProps) {
 
             {/* live dimension badge (primary photo only) */}
             {isPrimary ? (
-              <div className="pointer-events-none absolute left-1/2 top-full z-10 mt-1 -translate-x-1/2 whitespace-nowrap rounded border border-[#E5E7EB] bg-white px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-[#374151] shadow-[0_1px_2px_rgba(17,24,39,0.06)]">
+              <div
+                className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded border border-[#E5E7EB] bg-white px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-[#374151] shadow-[0_1px_2px_rgba(17,24,39,0.06)] ${
+                  badgeBelow
+                    ? "top-full mt-1"
+                    : badgeAbove
+                      ? "bottom-full mb-1"
+                      : "bottom-1"
+                }`}
+              >
                 {selectedIds.length > 1
                   ? `${selectedIds.length} foto • geser bersama`
                   : `${Math.round(p.wMm * 10) / 10} × ${Math.round(p.hMm * 10) / 10} mm`}

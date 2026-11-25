@@ -96,6 +96,7 @@ export function PrintStation() {
                   onDuplicate: store.duplicatePhotoPlacements,
                   onChangePhoto: store.replacePhotoItem,
                   onCropPhoto: setCropPlacementId,
+                  onCoverPhoto: (id) => store.coverPhotoSheet([id]),
                 }
               : null
           }
@@ -161,6 +162,7 @@ export function PrintStation() {
             onAddPhotoFiles: store.addPhotoFiles,
             onChangePhoto: store.replacePhotoItem,
             onCropPhoto: setCropPlacementId,
+            onCoverSheet: store.coverPhotoSheet,
           }}
         />
       </main>

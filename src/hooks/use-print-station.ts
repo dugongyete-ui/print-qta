@@ -106,6 +106,23 @@ function placementBBox(p: {
   return { x: cx - w / 2, y: cy - h / 2, w, h };
 }
 
+/**
+ * Manual-edit clamp: allow the photo to extend beyond the paper edges
+ * ("full-bleed" — the preview stage and the print rasterizer both crop at
+ * the sheet boundary, so what the user sees is exactly what prints). Only
+ * the photo's center is kept on the paper so an oversized photo can never
+ * be dragged completely off the sheet and lost.
+ */
+function clampPlacementBleed(
+  p: PhotoPlacement,
+  paperWmm: number,
+  paperHmm: number,
+): PhotoPlacement {
+  const cx = Math.min(Math.max(p.xMm + p.wMm / 2, 0), paperWmm);
+  const cy = Math.min(Math.max(p.yMm + p.hMm / 2, 0), paperHmm);
+  return { ...p, xMm: cx - p.wMm / 2, yMm: cy - p.hMm / 2 };
+}
+
 /** Keep the visual bbox fully on the paper by clamping the rotation center. */
 function clampPlacement(
   p: PhotoPlacement,
@@ -921,7 +938,11 @@ export function usePrintStation() {
   /**
    * Batch geometry edit — group drag / group nudge / align / single resize.
    * Hand edit pauses auto re-tiling so a manual layout is never reshuffled by
-   * the next upload.
+   * the next upload. Sizes may exceed the paper (full-bleed enlargement —
+   * "perbesar sampai kertas penuh"): the overflow is cropped at the sheet
+   * boundary by the preview and the print rasterizer alike, so the editor
+   * stays WYSIWYG while nothing blocks the photo from covering every mm of
+   * the paper.
    */
   const updatePhotoPlacements = useCallback(
     (updates: Array<{ id: string; patch: Partial<PhotoPlacement> }>) => {
@@ -934,10 +955,10 @@ export function usePrintStation() {
           const patch = patches.get(p.id);
           if (!patch) return p;
           const next = { ...p, ...patch };
-          next.wMm = Math.min(Math.max(next.wMm, MIN_PHOTO_MM), paperW);
-          next.hMm = Math.min(Math.max(next.hMm, MIN_PHOTO_MM), paperH);
+          next.wMm = Math.max(next.wMm, MIN_PHOTO_MM);
+          next.hMm = Math.max(next.hMm, MIN_PHOTO_MM);
           next.rotation = normRotation(next.rotation);
-          return clampPlacement(next, paperW, paperH);
+          return clampPlacementBleed(next, paperW, paperH);
         }),
       );
     },
@@ -1366,6 +1387,93 @@ export function usePrintStation() {
     toast.success(`Lembar terisi — ${cols} × ${rows} foto (${out.length} salinan).`);
   }, []);
 
+  /**
+   * "Penuhi Lembar" — enlarge until the paper shows no empty area at all.
+   * One photo: the frame grows to the full sheet (full-bleed, fit=cover) so
+   * every mm of paper is covered; the excess image is cropped exactly at the
+   * paper edge by the preview and the print rasterizer. Several photos: the
+   * whole group is scaled up uniformly around its center until it covers the
+   * sheet, keeping relative positions (Word-like "fit group to page").
+   */
+  const coverPhotoSheet = useCallback((ids?: string[]) => {
+    const list = photoPlacementsRef.current;
+    if (list.length === 0) return;
+    const wanted = ids && ids.length > 0 ? ids : photoSelectedIdsRef.current;
+    const targets = wanted.length > 0
+      ? list.filter((p) => wanted.includes(p.id))
+      : list;
+    if (targets.length === 0) return;
+    layoutTouchedRef.current = true;
+    const { wMm: paperW, hMm: paperH } = paperDimsRef.current;
+
+    if (targets.length === 1) {
+      const t = targets[0];
+      setPhotoPlacements((cur) =>
+        cur.map((p) =>
+          p.id === t.id
+            ? { ...p, xMm: 0, yMm: 0, wMm: paperW, hMm: paperH, fit: "cover" }
+            : p,
+        ),
+      );
+      setPhotoSelectedIds([t.id]);
+      toast.success("Foto mengisi lembar penuh — tidak ada kertas kosong.", {
+        description:
+          "Bagian foto yang melebihi kertas terpotong rapi di tepi (full bleed). Gunakan slider Geser Potongan di panel kanan untuk memilih bagian yang tercetak.",
+      });
+      return;
+    }
+
+    // Group: uniform scale until the group bbox covers the sheet (cover
+    // factor — no empty paper left in any direction), re-centered on the
+    // PAPER center so the covered area is symmetric (a top-aligned grid
+    // would otherwise leave the far edge empty after scaling).
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of targets) {
+      const bb = placementBBox(p);
+      minX = Math.min(minX, bb.x);
+      minY = Math.min(minY, bb.y);
+      maxX = Math.max(maxX, bb.x + bb.w);
+      maxY = Math.max(maxY, bb.y + bb.h);
+    }
+    const gw = Math.max(1e-6, maxX - minX);
+    const gh = Math.max(1e-6, maxY - minY);
+    const factor = Math.max(paperW / gw, paperH / gh);
+    const gcx = (minX + maxX) / 2;
+    const gcy = (minY + maxY) / 2;
+    const pcx = paperW / 2;
+    const pcy = paperH / 2;
+    const patches = new Map(
+      targets.map((p) => {
+        const cx = p.xMm + p.wMm / 2;
+        const cy = p.yMm + p.hMm / 2;
+        const ncx = pcx + (cx - gcx) * factor;
+        const ncy = pcy + (cy - gcy) * factor;
+        return [
+          p.id,
+          {
+            wMm: p.wMm * factor,
+            hMm: p.hMm * factor,
+            xMm: ncx - (p.wMm * factor) / 2,
+            yMm: ncy - (p.hMm * factor) / 2,
+          },
+        ] as const;
+      }),
+    );
+    setPhotoPlacements((cur) =>
+      cur.map((p) => (patches.has(p.id) ? { ...p, ...patches.get(p.id)! } : p)),
+    );
+    toast.success(
+      `${targets.length} foto diperbesar bersama sampai lembar penuh.`,
+      {
+        description:
+          "Posisi antar foto tetap — bagian yang melebihi kertas terpotong rapi.",
+      },
+    );
+  }, []);
+
   /** Tidy the sheet: pack every placement into rows within the printable area. */
   const autoArrangePhotos = useCallback(() => {
     const list = photoPlacementsRef.current;
@@ -1785,6 +1893,7 @@ export function usePrintStation() {
     duplicatePhotoPlacements,
     clearPhotoPlacements,
     fillPhotoSheet,
+    coverPhotoSheet,
     arrangePhotoCopies,
     autoArrangePhotos,
     alignPhotoPlacement,

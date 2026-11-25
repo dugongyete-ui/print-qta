@@ -53,6 +53,8 @@ interface PhotoStageData {
   onChangePhoto: (placementId: string, file: File) => void;
   /** "Potong Foto" — open the crop dialog for the slot's source image. */
   onCropPhoto: (placementId: string) => void;
+  /** "Penuhi" — enlarge one photo until it covers the entire sheet. */
+  onCoverPhoto: (placementId: string) => void;
 }
 
 interface PreviewStageProps {
@@ -495,6 +497,7 @@ export function PreviewStage(props: PreviewStageProps) {
                   onDuplicate={photo.onDuplicate}
                   onChangePhoto={photo.onChangePhoto}
                   onCropPhoto={photo.onCropPhoto}
+                  onCoverPhoto={photo.onCoverPhoto}
                 />
               </div>
             </div>

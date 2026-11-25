@@ -16,6 +16,7 @@ import {
   Eraser,
   ImagePlus,
   LayoutGrid,
+  Maximize2,
   Minus,
   Plus,
   Repeat,
@@ -250,6 +251,9 @@ interface PhotoInspectorProps {
   onChangePhoto: (placementId: string, file: File) => void;
   /** "Potong Foto" — open the crop dialog for the slot's source image. */
   onCropPhoto: (placementId: string) => void;
+  /** "Penuhi Lembar" — enlarge the selection until it covers the entire
+   * sheet (full-bleed, no empty paper left). */
+  onCoverSheet: (ids: string[]) => void;
 }
 
 const PRESET_GROUP_ORDER: PhotoPresetGroup[] = ["pas", "r", "square", "custom"];
@@ -285,6 +289,7 @@ export function PhotoInspector({
   onAddPhotoFiles,
   onChangePhoto,
   onCropPhoto,
+  onCoverSheet,
 }: PhotoInspectorProps) {
   const selectedCount = selectedIds.length;
   // "Jumlah Foto" lives in the shared photo settings so this control, photo
@@ -459,6 +464,23 @@ export function PhotoInspector({
                 </button>
               </div>
             </div>
+            {/* "Penuhi Lembar" — the one-tap answer to "perbesar sampai tidak
+                ada kertas kosong": frame grows to the full sheet (single) or
+                the whole selection scales up together (group). */}
+            <button
+              type="button"
+              onClick={() => onCoverSheet(selectedIds)}
+              title="Perbesar sampai mengisi seluruh kertas — sisa kertas kosong hilang, bagian foto yang melebihi kertas terpotong rapi"
+              className="flex h-8 w-full items-center justify-center gap-1.5 rounded-md bg-[#003399] text-[11.5px] font-semibold text-white transition-colors hover:bg-[#002673]"
+            >
+              <Maximize2 size={12} strokeWidth={1.5} />
+              Penuhi Lembar (Full Bleed)
+            </button>
+            <p className="font-mono text-[9.5px] leading-relaxed text-[#9CA3AF]">
+              {selectedCount > 1
+                ? "Semua foto terpilih diperbesar bersama sampai kertas penuh — posisi antar foto tetap."
+                : "Foto diperbesar sampai tepi kertas — atur bagian yang tercetak lewat slider Geser Potongan di bawah."}
+            </p>
             <div className="flex gap-2">
               <NumField
                 label="Posisi X"
@@ -480,7 +502,7 @@ export function PhotoInspector({
                 label="Lebar"
                 value={selected.wMm}
                 min={10}
-                max={paperWmm}
+                max={paperWmm * 2}
                 onCommit={(v) =>
                   onUpdateSelected(
                     settings.lockAspect
@@ -496,7 +518,7 @@ export function PhotoInspector({
                 label="Tinggi"
                 value={selected.hMm}
                 min={10}
-                max={paperHmm}
+                max={paperHmm * 2}
                 onCommit={(v) =>
                   onUpdateSelected(
                     settings.lockAspect
@@ -834,8 +856,9 @@ export function PhotoInspector({
         </Row>
         {beyondMargin ? (
           <p className="font-mono text-[10px] leading-relaxed text-[#92400E]">
-            Ada foto melewati area margin — geser ke dalam garis putus-putus
-            agar tidak terpotong driver Epson.
+            Ada foto melewati garis margin — bagian di luar kertas otomatis
+            terpotong saat dicetak. Ingin cetak tanpa tepi putih? Gunakan
+            Penuhi Lembar + aktifkan Borderless.
           </p>
         ) : null}
         {/* Add-photo picker: several customers at once — every distinct face
